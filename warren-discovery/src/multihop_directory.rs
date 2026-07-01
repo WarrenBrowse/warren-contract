@@ -45,8 +45,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use warrenguard_multihop::{
-    ExitDescriptorSigned, RelayDescriptorSigned, verify_exit_descriptor, verify_node_attestation,
-    verify_operational_cert, verify_relay_descriptor,
+    ExitDescAttestation, ExitDescriptorSigned, RelayDescriptorSigned,
+    verify_exit_descriptor_with_dns_attestation, verify_node_attestation, verify_operational_cert,
+    verify_relay_descriptor,
 };
 
 /// Current directory format version. Bumping = incompatible rotation.
@@ -509,8 +510,14 @@ fn node_fully_vouched(operational_pubkey: &VerifyingKey, node: &NodeEntry) -> bo
     if verify_relay_descriptor(operational_pubkey, &node.relay).is_err() {
         return false;
     }
-    if verify_exit_descriptor(operational_pubkey, &node.exit).is_err() {
-        return false;
+    // Multi-hop client policy (engine spec): reject an exit that advertises
+    // `dns_disabled = true` but is only `/v1`-signed (the bit is unattested), a
+    // downgrade-attack suspect that could silently disable in-tunnel DNS. An
+    // attested exit, or an unattested exit with DNS enabled, is kept.
+    match verify_exit_descriptor_with_dns_attestation(operational_pubkey, &node.exit) {
+        Err(_) => return false,
+        Ok(ExitDescAttestation::Unattested) if node.exit.dns_disabled => return false,
+        Ok(_) => {}
     }
     let Ok(att_bytes) = hex::decode(&node.attestation_hex) else {
         return false;
@@ -747,6 +754,26 @@ mod tests {
         assert_eq!(v.nodes.len(), 1, "only the honestly-attested node is kept");
         assert_eq!(v.dropped, 1);
         assert_eq!(v.nodes[0].country, "se");
+    }
+
+    #[test]
+    fn unattested_exit_claiming_dns_disabled_is_dropped() {
+        // Engine-spec client policy (anti-downgrade): a `/v1`-only-signed exit
+        // (dns_disabled unattested) that advertises `dns_disabled = true` could
+        // silently disable in-tunnel DNS. It must be dropped. The `/v1` exit
+        // signature does not cover the dns bit, so flipping it keeps the
+        // signature valid but leaves the bit unattested.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let honest = signed_node(&op, 1, "fr", 1);
+        let mut downgrade = signed_node(&op, 2, "de", 2);
+        downgrade.exit.dns_disabled = true;
+        let signed = build(&root, &op, &server, vec![honest, downgrade]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify succeeds, downgrade-suspect exit dropped");
+        assert_eq!(v.nodes.len(), 1, "only the honest DNS-enabled node kept");
+        assert_eq!(v.dropped, 1);
+        assert_eq!(v.nodes[0].country, "fr");
     }
 
     #[test]
