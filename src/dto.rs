@@ -29,8 +29,10 @@ const TOKEN_ID_HEX_LEN: usize = 12;
 const COUNTRY_CODE_LEN: usize = 2;
 
 /// Errors raised by the validation newtypes when they receive a
-/// malformed string. The payload echoes the input verbatim so callers
-/// can surface a precise error message at the API boundary.
+/// malformed string. The payload carries only a redacted prefix of the
+/// input (see [`crate::redact`]): a rejected value can be identity
+/// material or a mispasted secret, so it is never echoed in full
+/// (no-log discipline).
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
     /// Pubkey string is not 64 lowercase hex chars.
@@ -109,10 +111,10 @@ impl TryFrom<&str> for TokenId {
     type Error = ValidationError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         if s.len() != TOKEN_ID_HEX_LEN || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::InvalidTokenId(s.to_owned()));
+            return Err(ValidationError::InvalidTokenId(crate::redact(s)));
         }
         if s.chars().any(|c| c.is_ascii_uppercase()) {
-            return Err(ValidationError::InvalidTokenId(s.to_owned()));
+            return Err(ValidationError::InvalidTokenId(crate::redact(s)));
         }
         Ok(Self(s.to_owned()))
     }
@@ -168,10 +170,10 @@ impl TryFrom<&str> for PubkeyHex {
     type Error = ValidationError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         if s.len() != PUBKEY_HEX_LEN || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::InvalidPubkey(s.to_owned()));
+            return Err(ValidationError::InvalidPubkey(crate::redact(s)));
         }
         if s.chars().any(|c| c.is_ascii_uppercase()) {
-            return Err(ValidationError::InvalidPubkey(s.to_owned()));
+            return Err(ValidationError::InvalidPubkey(crate::redact(s)));
         }
         Ok(Self(s.to_owned()))
     }
@@ -267,7 +269,7 @@ impl TryFrom<&str> for PubkeySs58 {
         if crate::ss58::is_valid(s) {
             Ok(Self(s.to_owned()))
         } else {
-            Err(ValidationError::InvalidPubkeySs58(s.to_owned()))
+            Err(ValidationError::InvalidPubkeySs58(crate::redact(s)))
         }
     }
 }
@@ -329,7 +331,7 @@ impl TryFrom<&str> for CountryCode {
     type Error = ValidationError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         if s.len() != COUNTRY_CODE_LEN || !s.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(ValidationError::InvalidCountryCode(s.to_owned()));
+            return Err(ValidationError::InvalidCountryCode(crate::redact(s)));
         }
         Ok(Self(s.to_ascii_uppercase()))
     }
@@ -1961,6 +1963,46 @@ pub struct SessionCloseRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_pubkey_hex_error_redacts_the_value() {
+        let bad = format!("{}Z", "a".repeat(63));
+        let msg = PubkeyHex::try_from(bad.as_str())
+            .expect_err("non-hex suffix must be rejected")
+            .to_string();
+        assert!(!msg.contains(&bad), "full value must not leak: {msg}");
+        assert!(msg.contains("aaaaaaaa…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn invalid_pubkey_ss58_error_redacts_the_value() {
+        let bad = "wbNotARealAddressNotARealAddressNotARealAddress";
+        let msg = PubkeySs58::try_from(bad)
+            .expect_err("bogus SS58 must be rejected")
+            .to_string();
+        assert!(!msg.contains(bad), "full value must not leak: {msg}");
+        assert!(msg.contains("wbNotARe…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn invalid_token_id_error_redacts_the_value() {
+        let bad = "AAAABBBBCCCC";
+        let msg = TokenId::try_from(bad)
+            .expect_err("uppercase token id must be rejected")
+            .to_string();
+        assert!(!msg.contains(bad), "full value must not leak: {msg}");
+        assert!(msg.contains("AAAABBBB…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn invalid_country_code_error_redacts_the_value() {
+        let bad = "NotACountryCode";
+        let msg = CountryCode::try_from(bad)
+            .expect_err("long string must be rejected")
+            .to_string();
+        assert!(!msg.contains(bad), "full value must not leak: {msg}");
+        assert!(msg.contains("NotACoun…"), "short prefix kept: {msg}");
+    }
 
     #[test]
     fn payment_method_serializes_to_lowercase_wire_form() {

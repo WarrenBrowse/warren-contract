@@ -177,9 +177,10 @@ pub enum DirectoryError {
     /// The declared server pubkey does not match any pinned server key.
     #[error("server pubkey mismatch: got {got}, expected {expected}")]
     ServerPubkeyMismatch {
-        /// Pubkey hex announced in the JSON.
+        /// Redacted prefix of the pubkey hex announced in the JSON
+        /// (no-log discipline: never the full key).
         got: String,
-        /// Comma-joined pinned set.
+        /// Comma-joined redacted prefixes of the pinned set.
         expected: String,
     },
     /// Invalid hex for one of the pubkey/signature fields.
@@ -323,8 +324,12 @@ pub fn verify_multihop_directory_any(
             .any(|p| *p == signed.server_pubkey_hex)
     {
         return Err(DirectoryError::ServerPubkeyMismatch {
-            got: signed.server_pubkey_hex.clone(),
-            expected: expected_server_pubkeys.join(","),
+            got: warren_contract::redact(&signed.server_pubkey_hex),
+            expected: expected_server_pubkeys
+                .iter()
+                .map(|p| warren_contract::redact(p))
+                .collect::<Vec<_>>()
+                .join(","),
         });
     }
 
@@ -822,6 +827,26 @@ mod tests {
         let err = verify_multihop_directory_any(&json, &[&hexk(&attacker)], &[&hexk(&root)])
             .expect_err("wrong server pin must reject");
         assert!(matches!(err, DirectoryError::ServerPubkeyMismatch { .. }));
+    }
+
+    #[test]
+    fn server_pubkey_mismatch_error_redacts_both_keys() {
+        let (root, op, server, attacker) = (key(0x01), key(0x02), key(0x03), key(0x09));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let announced = hexk(&server);
+        let pinned = hexk(&attacker);
+
+        let msg = verify_multihop_directory_any(&json, &[&pinned], &[&hexk(&root)])
+            .expect_err("wrong server pin must reject")
+            .to_string();
+        assert!(
+            !msg.contains(&announced),
+            "announced key must not leak: {msg}"
+        );
+        assert!(!msg.contains(&pinned), "pinned key must not leak: {msg}");
+        assert!(msg.contains(&announced[..8]), "short prefix kept: {msg}");
+        assert!(msg.contains(&pinned[..8]), "short prefix kept: {msg}");
     }
 
     #[test]

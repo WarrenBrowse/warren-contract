@@ -20,7 +20,9 @@ use crate::signed::{JsonNode, json_node_to_warren};
 /// per-endpoint geoip/flags). Was v3 (v6 node model), v2 (flat `relays`).
 const SUPPORTED_VERSION: u32 = 4;
 
-/// Parsing errors for `warren-relays.json`.
+/// Parsing errors for `warren-relays.json`. Malformed-input payloads
+/// carry only a redacted prefix of the offending value (a node id is a
+/// pubkey; no-log discipline).
 #[derive(Debug, thiserror::Error)]
 pub enum JsonError {
     /// Syntactically invalid JSON or unexpected structure.
@@ -86,5 +88,53 @@ pub(crate) fn decode_endpoint_id(s: &str) -> Result<WarrenPubkey, JsonError> {
     if let Ok(bytes) = warren_contract::ss58::decode(s) {
         return Ok(WarrenPubkey::from_bytes(bytes));
     }
-    WarrenPubkey::from_hex(s).map_err(|_| JsonError::InvalidEndpointId(s.to_owned()))
+    WarrenPubkey::from_hex(s).map_err(|_| JsonError::InvalidEndpointId(warren_contract::redact(s)))
+}
+
+#[cfg(test)]
+mod tests {
+    use warrenguard_wire::ExitId;
+
+    use super::*;
+    use crate::signed::{JsonEgress, JsonEndpoint, JsonLocation, json_node_to_warren};
+
+    #[test]
+    fn invalid_endpoint_id_error_redacts_the_id() {
+        let bogus = format!("{}Z", "f".repeat(63));
+        let msg = decode_endpoint_id(&bogus)
+            .expect_err("neither SS58 nor hex must be rejected")
+            .to_string();
+        assert!(!msg.contains(&bogus), "full id must not leak: {msg}");
+        assert!(msg.contains("ffffffff…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn invalid_endpoint_addr_error_redacts_the_addr() {
+        let bad_addr = "999.999.999.999-evil";
+        let node = JsonNode {
+            id: "00".repeat(32),
+            exit_id: ExitId::from_bytes([0xaa; 16]),
+            location: JsonLocation {
+                country: "FR".to_owned(),
+                city: "Paris".to_owned(),
+            },
+            weight: 100,
+            active: true,
+            egress: JsonEgress {
+                ipv4: true,
+                ipv6: false,
+            },
+            endpoints: vec![JsonEndpoint {
+                addr: bad_addr.to_owned(),
+                family: "ipv4".to_owned(),
+                listeners: vec![],
+            }],
+            cover_domain: None,
+        };
+        let msg = json_node_to_warren(node)
+            .expect_err("malformed IP literal must be rejected")
+            .to_string();
+        assert!(!msg.contains(bad_addr), "full addr must not leak: {msg}");
+        assert!(msg.contains("999.999.…"), "short prefix kept: {msg}");
+    }
 }

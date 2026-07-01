@@ -36,7 +36,7 @@
 //! `roles`, per-endpoint `geoip`, and the per-endpoint `ingress`/`egress`
 //! flags. Roles are structural (an endpoint with a listener is dialable);
 //! egress capability is two node-level booleans (`egress.ipv4` /
-//! `egress.ipv6`) with NO egress source address — a client must know an
+//! `egress.ipv6`) with NO egress source address: a client must know an
 //! exit's geolocation to pick a country, but never its egress IP. The
 //! full canonical model (geoip, egress addresses, relay-facing exit
 //! ingress) lives in the admin structure, not on this wire.
@@ -105,7 +105,7 @@ pub struct JsonEndpoint {
 
 /// **Wire** node-level egress capability (v7): whether the node can route
 /// in-tunnel client traffic to the v4 / v6 internet. Capability booleans
-/// only — the egress source address is NEVER published to clients.
+/// only: the egress source address is NEVER published to clients.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct JsonEgress {
     /// `true` if the node has a working IPv4 egress source.
@@ -233,9 +233,10 @@ pub enum SignedError {
     /// the client.
     #[error("server pubkey mismatch: got {got}, expected {expected}")]
     ServerPubkeyMismatch {
-        /// Pubkey hex announced in the JSON.
+        /// Redacted prefix of the pubkey hex announced in the JSON
+        /// (no-log discipline: never the full key).
         got: String,
-        /// Pubkey hex pinned on the client.
+        /// Redacted prefix of the pubkey hex pinned on the client.
         expected: String,
     },
     /// Invalid hex for `server_pubkey_hex` or `signature_hex`.
@@ -343,8 +344,12 @@ pub fn verify_signed_relay_list_any(
             .any(|p| *p == signed.server_pubkey_hex)
     {
         return Err(SignedError::ServerPubkeyMismatch {
-            got: signed.server_pubkey_hex.clone(),
-            expected: expected_server_pubkeys.join(","),
+            got: warren_contract::redact(&signed.server_pubkey_hex),
+            expected: expected_server_pubkeys
+                .iter()
+                .map(|p| warren_contract::redact(p))
+                .collect::<Vec<_>>()
+                .join(","),
         });
     }
 
@@ -405,17 +410,17 @@ pub(crate) fn json_node_to_warren(n: JsonNode) -> Result<WarrenRelay, JsonError>
         let ip: IpAddr = e
             .addr
             .parse()
-            .map_err(|_| JsonError::InvalidIpAddr(e.addr.clone()))?;
+            .map_err(|_| JsonError::InvalidIpAddr(warren_contract::redact(&e.addr)))?;
         // `family` is explicit on the wire but must agree with `addr`
         // (defense against a list that mislabels a family to dodge a
         // client's IP-version filter).
         let declared_v6 = match e.family.as_str() {
             "ipv4" => false,
             "ipv6" => true,
-            _ => return Err(JsonError::InvalidFamily(e.family.clone())),
+            _ => return Err(JsonError::InvalidFamily(warren_contract::redact(&e.family))),
         };
         if declared_v6 != ip.is_ipv6() {
-            return Err(JsonError::InvalidFamily(e.family.clone()));
+            return Err(JsonError::InvalidFamily(warren_contract::redact(&e.family)));
         }
         let listeners = e
             .listeners
@@ -573,6 +578,26 @@ mod tests {
         let err = verify_signed_relay_list(&json, Some(&other_pubkey))
             .expect_err("must reject mismatched server pubkey");
         assert!(matches!(err, SignedError::ServerPubkeyMismatch { .. }));
+    }
+
+    #[test]
+    fn server_pubkey_mismatch_error_redacts_both_keys() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).unwrap();
+        let announced = hex::encode(key.verifying_key().to_bytes());
+        let pinned = hex::encode([0xff; 32]);
+
+        let msg = verify_signed_relay_list(&json, Some(&pinned))
+            .expect_err("must reject mismatched server pubkey")
+            .to_string();
+        assert!(
+            !msg.contains(&announced),
+            "announced key must not leak: {msg}"
+        );
+        assert!(!msg.contains(&pinned), "pinned key must not leak: {msg}");
+        assert!(msg.contains(&announced[..8]), "short prefix kept: {msg}");
+        assert!(msg.contains(&pinned[..8]), "short prefix kept: {msg}");
     }
 
     #[test]

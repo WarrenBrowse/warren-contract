@@ -229,8 +229,12 @@ pub fn verify_roster_any(
             .any(|p| *p == signed.admin_pubkey_hex)
     {
         return Err(SignedError::ServerPubkeyMismatch {
-            got: signed.admin_pubkey_hex.clone(),
-            expected: expected_admin_pubkeys.join(","),
+            got: warren_contract::redact(&signed.admin_pubkey_hex),
+            expected: expected_admin_pubkeys
+                .iter()
+                .map(|p| warren_contract::redact(p))
+                .collect::<Vec<_>>()
+                .join(","),
         });
     }
     let pubkey_bytes: [u8; 32] = hex::decode(&signed.admin_pubkey_hex)
@@ -334,6 +338,33 @@ mod tests {
         let json = serde_json::to_string(&signed).unwrap();
         let err = verify_roster(&json, Some(&pin(&legit))).expect_err("pinned mismatch");
         assert!(matches!(err, SignedError::ServerPubkeyMismatch { .. }));
+    }
+
+    #[test]
+    fn admin_pubkey_mismatch_error_redacts_both_keys() {
+        let attacker = SigningKey::from_bytes(&[0x11; 32]);
+        let legit = admin_key();
+        let signed = sign_roster(
+            vec![entry(1, "se", "Stockholm")],
+            &attacker,
+            1,
+            1_000,
+            9_999,
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let announced = pin(&attacker);
+        let pinned = pin(&legit);
+
+        let msg = verify_roster(&json, Some(&pinned))
+            .expect_err("pinned mismatch")
+            .to_string();
+        assert!(
+            !msg.contains(&announced),
+            "announced key must not leak: {msg}"
+        );
+        assert!(!msg.contains(&pinned), "pinned key must not leak: {msg}");
+        assert!(msg.contains(&announced[..8]), "short prefix kept: {msg}");
+        assert!(msg.contains(&pinned[..8]), "short prefix kept: {msg}");
     }
 
     #[test]
