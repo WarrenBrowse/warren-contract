@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod dto;
+pub mod release;
 pub mod ss58;
 
 /// Redacts an untrusted input for error display: at most the first 8

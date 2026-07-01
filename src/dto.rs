@@ -16,6 +16,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 pub use warrenguard_wire::ExitId;
 
+use crate::release::SignedReleaseManifest;
+
 // ---------------------------------------------------------------------------
 // Validation newtypes. Owning the shape rules here lets every DTO that
 // embeds these fields get serde-level validation for free: a malformed
@@ -850,6 +852,11 @@ pub struct RegisterExitRequest {
     /// exit RPK. `None` (legacy / RPK exits) is omitted from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_domain: Option<String>,
+    /// Where the node stands in the fleet-update sequence (doc 52): the
+    /// rollout controller advances the per-node state machine on this
+    /// report. `None` from an exit that pre-dates the update agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_status: Option<ExitUpdateStatus>,
 }
 
 /// `POST /v1/exits/register` response body (ADR 36). The heartbeat is the
@@ -870,6 +877,49 @@ pub struct RegisterExitResponse {
     /// deadline + opaque reason the exit relays to clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain: Option<DrainDirective>,
+    /// Present iff the rollout controller wants this node on another
+    /// release (doc 52). The signed manifest is embedded verbatim: the
+    /// node re-verifies it against its pinned offline signer key, so
+    /// the transport (and warren-api itself) adds no update authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<SignedReleaseManifest>,
+}
+
+/// Where an exit's update agent stands, reported on each heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitUpdateStatus {
+    /// Current agent state.
+    pub state: ExitUpdateState,
+    /// Release the agent is working toward (or last applied), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    /// Redacted failure summary when `state` is `failed` (never carries
+    /// identity material or secrets; no-log discipline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Update-agent states (doc 52 §4). Wire values are lowercase
+/// snake_case; new states may be appended, so consumers must treat the
+/// enum as open-ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitUpdateState {
+    /// No update in flight; running == last authorized release.
+    Idle,
+    /// Manifest accepted; downloading / hashing the binary.
+    Staging,
+    /// Binary staged and verified; waiting for the privileged swapper.
+    Staged,
+    /// The privileged updater is installing + restarting the service.
+    Swapping,
+    /// Running binary matches the manifest's release.
+    Applied,
+    /// The update could not be applied (see `error`).
+    Failed,
+    /// Applied in RAM but the A/B slot persist is pending (e.g. GRUB
+    /// nodes where the automated slot bake is not yet safe).
+    PersistPending,
 }
 
 /// Maintenance-drain directive handed to an exit on its heartbeat
@@ -2415,6 +2465,7 @@ mod tests {
             version: None,
             active_sessions: None,
             cover_domain: None,
+            update_status: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -2453,6 +2504,7 @@ mod tests {
             version: None,
             active_sessions: None,
             cover_domain: None,
+            update_status: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -2491,6 +2543,7 @@ mod tests {
             version: None,
             active_sessions: None,
             cover_domain: None,
+            update_status: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -2519,6 +2572,7 @@ mod tests {
             version: Some("v0.3.7-2-gabc1234".to_owned()),
             active_sessions: None,
             cover_domain: None,
+            update_status: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();

@@ -90,3 +90,78 @@ fn incident_reason_screaming_snake_case() {
         serde_json::json!("AUTH_FAIL")
     );
 }
+
+#[test]
+fn register_exit_response_update_directive_shape() {
+    // Doc 52: the heartbeat response optionally piggybacks the signed
+    // release manifest, embedded verbatim (the node re-verifies it; the
+    // transport adds no authority). Absent on a normal heartbeat, and a
+    // default response stays the empty object older exits expect.
+    let resp = RegisterExitResponse::default();
+    assert_eq!(json(&resp), serde_json::json!({}));
+
+    let manifest = warren_contract::release::sign_release_manifest(
+        "v0.7.0-3-gabc1234",
+        "canary",
+        &"9f".repeat(32),
+        42_000_000,
+        7,
+        1_700_000_000,
+        1_700_086_400,
+        &ed25519_dalek::SigningKey::from_bytes(&[0xab; 32]),
+    );
+    let resp = RegisterExitResponse {
+        drain: None,
+        update: Some(manifest),
+    };
+    let v = json(&resp);
+    assert_eq!(v["update"]["release_version"], "v0.7.0-3-gabc1234");
+    assert_eq!(v["update"]["generation"], 7);
+    assert!(
+        v.get("drain").is_none(),
+        "absent drain must stay omitted next to a present update"
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn exit_update_status_shape() {
+    let st = ExitUpdateStatus {
+        state: ExitUpdateState::Staged,
+        target_version: Some("v0.7.0-3-gabc1234".to_owned()),
+        error: None,
+    };
+    assert_eq!(
+        json(&st),
+        serde_json::json!({
+            "state": "staged",
+            "target_version": "v0.7.0-3-gabc1234",
+        }),
+        "state is lowercase snake_case; absent error is omitted"
+    );
+    roundtrips(&st);
+
+    let failed = ExitUpdateStatus {
+        state: ExitUpdateState::PersistPending,
+        target_version: None,
+        error: Some("slot bake unsupported (grub)".to_owned()),
+    };
+    assert_eq!(json(&failed)["state"], "persist_pending");
+    roundtrips(&failed);
+}
+
+#[test]
+fn legacy_register_exit_request_without_update_status_still_parses() {
+    // Wire-compat: exits that pre-date the update agent omit the field.
+    let legacy = serde_json::json!({
+        "endpoints": [],
+        "country": "SG",
+        "city": "Singapore",
+        "weight": 100,
+    });
+    let req: RegisterExitRequest = serde_json::from_value(legacy).unwrap();
+    assert!(
+        req.update_status.is_none(),
+        "absent update_status must parse as None"
+    );
+}
