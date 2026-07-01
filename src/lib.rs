@@ -4,5 +4,6 @@
 //! - [`ss58`]: wallet-identity address codec (Warren prefix `13295`, `wb…`).
 //! - [`dto`]: the HTTP `/v1` API request/response types.
 
+pub mod auth;
 pub mod dto;
 pub mod ss58;
