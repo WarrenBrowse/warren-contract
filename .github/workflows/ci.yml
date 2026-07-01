@@ -29,8 +29,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The root [patch] redirects the pinned warrenguard git deps to the
-      # sibling checkout, so CI clones it there at `.warrenguard-version`
-      # (ENGINE_TOKEN: org PAT with Contents:read on WarrenBrowse/warrenguard).
+      # sibling checkout, so CI clones it there at `.warrenguard-version`.
+      # ENGINE_TOKEN (repo PAT with Contents:read on WarrenBrowse/warrenguard)
+      # is optional: the org is on the free plan, so org-level secrets do not
+      # reach private repos. Without it we fall back to SSH, which the
+      # self-hosted runner already holds org credentials for (it fetches the
+      # warren-quinn ssh git dep for warren-sdk-rs the same way).
       - name: checkout warrenguard engine
         env:
           ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
@@ -38,10 +42,13 @@ jobs:
           set -euo pipefail
           REV="$(tr -d '[:space:]' < .warrenguard-version)"
           echo "==> warrenguard engine pinned at ${REV}"
+          if [ -n "${ENGINE_TOKEN:-}" ]; then
+            URL="https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git"
+          else
+            URL="git@github.com:WarrenBrowse/warrenguard.git"
+          fi
           rm -rf ../warrenguard
-          git clone --quiet \
-            "https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git" \
-            ../warrenguard
+          git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
           echo "==> warrenguard checked out at $(git -C ../warrenguard rev-parse --short HEAD)"
       - uses: dtolnay/rust-toolchain@1.89.0
