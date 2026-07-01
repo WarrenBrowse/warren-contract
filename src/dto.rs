@@ -1095,6 +1095,110 @@ pub struct AdminExitRow {
     pub cover_domain: Option<String>,
 }
 
+/// Admin row of one uploaded exit release (doc 52).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReleaseRow {
+    /// Target build identifier.
+    pub version: String,
+    /// Rollout channel.
+    pub channel: String,
+    /// Hex SHA-256 of the authorized binary.
+    pub binary_sha256_hex: String,
+    /// Exact binary size in bytes.
+    pub binary_size: u64,
+    /// Monotonic manifest generation.
+    pub generation: u64,
+    /// Unix epoch seconds after which the manifest is stale.
+    pub expires_at: u64,
+    /// Unix epoch seconds the release was uploaded.
+    pub created_at: u64,
+    /// True once the binary bytes were uploaded and hash-verified.
+    pub binary_uploaded: bool,
+}
+
+/// Response for `GET /v1/admin/releases`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminReleasesResponse {
+    /// Catalog, newest generation first.
+    pub releases: Vec<AdminReleaseRow>,
+}
+
+/// Request for `POST /v1/admin/releases`: the offline-signed manifest,
+/// embedded verbatim. The server re-verifies the signature against its
+/// pinned release-signer key before cataloguing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCreateReleaseRequest {
+    /// Signed manifest produced by `wapi admin-sign-release`.
+    pub manifest: SignedReleaseManifest,
+}
+
+/// Request for `POST /v1/admin/rollouts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCreateRolloutRequest {
+    /// Target release version (must be catalogued with its binary).
+    pub version: String,
+    /// Canary node override. `None` lets the server pick the
+    /// least-loaded active exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary_pubkey_ss58: Option<PubkeySs58>,
+}
+
+/// One node row inside an admin rollout view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRolloutNodeRow {
+    /// Node pubkey (SS58).
+    pub pubkey_ss58: PubkeySs58,
+    /// True for the canary node.
+    pub is_canary: bool,
+    /// State-machine token (`waiting`, `pending`, `draining`,
+    /// `swapping`, `verifying`, `done`, `failed`, `rolled_back`).
+    pub state: String,
+    /// Version the node ran before the rollout (rollback target).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<String>,
+    /// Redacted failure summary when `state` is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Unix epoch seconds of the last transition.
+    pub updated_at: u64,
+}
+
+/// Admin view of one rollout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRolloutResponse {
+    /// Store-assigned identifier.
+    pub id: i64,
+    /// Target release version.
+    pub version: String,
+    /// Whole-rollout status token (`active`, `completed`,
+    /// `rolled_back`, `aborted`).
+    pub status: String,
+    /// Unix epoch seconds the rollout was created.
+    pub created_at: u64,
+    /// Per-node rows, canary first.
+    pub nodes: Vec<AdminRolloutNodeRow>,
+}
+
+/// One audit line for `GET /v1/admin/rollouts/audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRolloutAuditRow {
+    /// Unix epoch seconds of the action.
+    pub at: u64,
+    /// Admin pubkey prefix or `controller`.
+    pub actor: String,
+    /// Action token.
+    pub action: String,
+    /// Free-form JSON detail, re-serialized as a string.
+    pub detail_json: String,
+}
+
+/// Response for `GET /v1/admin/rollouts/audit`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRolloutAuditResponse {
+    /// Most recent lines, newest first.
+    pub rows: Vec<AdminRolloutAuditRow>,
+}
+
 /// Response for `GET /v1/admin/exits`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminExitsResponse {
