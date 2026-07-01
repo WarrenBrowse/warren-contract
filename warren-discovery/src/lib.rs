@@ -11,8 +11,6 @@
 //! then the tunnel state machine calls the Warren backend when
 //! selected.
 
-#![cfg_attr(not(test), warn(missing_docs))]
-
 mod error;
 mod json_io;
 mod multihop_directory;

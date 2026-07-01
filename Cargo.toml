@@ -21,6 +21,29 @@ members = ["warren-discovery"]
 warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "906ddc75a7a33a17ef744cf0b486e6ed4bc4ff4e" }
 warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "906ddc75a7a33a17ef744cf0b486e6ed4bc4ff4e" }
 
+# Lints applied to every crate in the workspace via `[lints] workspace = true`.
+# Mirrors warren-sdk-rs / warren-core policy: zero unsafe, deny correctness,
+# document the public surface.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[workspace.lints.rustdoc]
+# A broken doc link is a silent rot: deny it so a renamed symbol fails the doc
+# build instead of shipping a dead reference.
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+must_use_candidate = "warn"
+needless_pass_by_value = "warn"
+
+[lints]
+workspace = true
+
 [dependencies]
 bs58 = "0.5"
 blake2 = "0.10"

@@ -19,7 +19,7 @@
 //!
 //! Prefix `13295` lands every Warren address in a fixed visual bucket:
 //! the base58 output always starts with **`wb`** (Warren Browse) and is
-//! 47–49 characters long. This is a deliberate branding choice and a
+//! 47-49 characters long. This is a deliberate branding choice and a
 //! cheap human sanity check ("does it start with `wb`?").
 //!
 //! # Wire compatibility

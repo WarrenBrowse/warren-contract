@@ -127,7 +127,7 @@ impl Listener {
 /// API-derived geolocation of an IP address: the ground truth
 /// geo-restricted services see. Distinct from the node's manual
 /// [`Location`] (authoritative for selection); may legitimately disagree.
-/// Internal/admin only — never projected onto the public client lists.
+/// Internal/admin only, never projected onto the public client lists.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeoIp {
     location: Location,

@@ -10,8 +10,6 @@
 //! otherwise pay the cost of compiling the server) can depend on it
 //! cheaply.
 
-#![cfg_attr(not(test), warn(missing_docs))]
-
 use std::fmt;
 use std::str::FromStr;
 

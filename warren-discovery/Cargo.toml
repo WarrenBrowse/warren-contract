@@ -8,6 +8,9 @@ description = "Warren relay-list discovery: signed relay-list verify + weighted 
 repository = "https://github.com/WarrenBrowse/warren-contract"
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 warren-contract = { path = ".." }
 warrenguard-wire = { workspace = true }
