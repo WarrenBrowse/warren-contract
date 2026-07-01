@@ -852,7 +852,7 @@ pub struct RegisterExitRequest {
     /// exit RPK. `None` (legacy / RPK exits) is omitted from the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_domain: Option<String>,
-    /// Where the node stands in the fleet-update sequence (doc 52): the
+    /// Where the node stands in the fleet-update sequence (doc 54): the
     /// rollout controller advances the per-node state machine on this
     /// report. `None` from an exit that pre-dates the update agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -878,7 +878,7 @@ pub struct RegisterExitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain: Option<DrainDirective>,
     /// Present iff the rollout controller wants this node on another
-    /// release (doc 52). The signed manifest is embedded verbatim: the
+    /// release (doc 54). The signed manifest is embedded verbatim: the
     /// node re-verifies it against its pinned offline signer key, so
     /// the transport (and warren-api itself) adds no update authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -899,7 +899,7 @@ pub struct ExitUpdateStatus {
     pub error: Option<String>,
 }
 
-/// Update-agent states (doc 52 §4). Wire values are lowercase
+/// Update-agent states (doc 54 §4). Wire values are lowercase
 /// snake_case; new states may be appended, so consumers must treat the
 /// enum as open-ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1095,7 +1095,7 @@ pub struct AdminExitRow {
     pub cover_domain: Option<String>,
 }
 
-/// Admin row of one uploaded exit release (doc 52).
+/// Admin row of one uploaded exit release (doc 54).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminReleaseRow {
     /// Target build identifier.
