@@ -10,8 +10,8 @@ publish = false
 
 [dependencies]
 warren-contract = { path = ".." }
-warrenguard-wire = { path = "../../warrenguard/crates/warrenguard-wire" }
-warrenguard-multihop = { path = "../../warrenguard/crates/warrenguard-multihop" }
+warrenguard-wire = { workspace = true }
+warrenguard-multihop = { workspace = true }
 ed25519-dalek = { version = "2", features = ["zeroize", "rand_core"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
