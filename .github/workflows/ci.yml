@@ -1,0 +1,53 @@
+name: CI
+
+# Runs exclusively on the WarrenBrowse org self-hosted runners (same policy as
+# warren-sdk-rs; label set matched against the provisioned Rust runner
+# macstudio-linux-rosetta). Do not switch to a GitHub-hosted runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  # A single self-hosted Linux runner serves these jobs; cancel superseded runs
+  # on the same ref so a burst of pushes cannot pile up a serial backlog.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: fmt + clippy + test
+    runs-on: [self-hosted, Linux, X64, macstudio-rosetta]
+    steps:
+      - uses: actions/checkout@v4
+      # The root [patch] redirects the pinned warrenguard git deps to the
+      # sibling checkout, so CI clones it there at `.warrenguard-version`
+      # (ENGINE_TOKEN: org PAT with Contents:read on WarrenBrowse/warrenguard).
+      - name: checkout warrenguard engine
+        env:
+          ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          REV="$(tr -d '[:space:]' < .warrenguard-version)"
+          echo "==> warrenguard engine pinned at ${REV}"
+          rm -rf ../warrenguard
+          git clone --quiet \
+            "https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git" \
+            ../warrenguard
+          git -C ../warrenguard checkout --quiet "${REV}"
+          echo "==> warrenguard checked out at $(git -C ../warrenguard rev-parse --short HEAD)"
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
