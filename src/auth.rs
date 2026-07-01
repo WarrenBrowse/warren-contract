@@ -69,11 +69,8 @@ impl RequestSignature {
 
 /// Computes the client-side signature material for a Warren API request.
 ///
-/// `timestamp` and `nonce` are inputs (not read from a clock/RNG here) so this
-/// stays deterministic and FFI-friendly; the caller supplies a system clock and
-/// 16 random bytes. This is the single definition of the signing procedure,
-/// shared by the SDK client and the backend's own API client so the two cannot
-/// drift on anything beyond the canonical message.
+/// `timestamp`/`nonce` are inputs (not a clock/RNG) to stay deterministic and
+/// FFI-friendly. Single definition, so the SDK and backend clients cannot drift.
 #[must_use]
 pub fn sign_request(
     signing_key: &ed25519_dalek::SigningKey,
@@ -125,15 +122,12 @@ mod tests {
             [0x11; 16],
         );
 
-        // The headers must carry the signer address and reproduce the inputs.
         assert_eq!(
             sig.pubkey_ss58,
             crate::ss58::encode(&key.verifying_key().to_bytes())
         );
         assert_eq!(sig.nonce_hex, "11".repeat(16));
 
-        // The signature must verify against the exact canonical message a server
-        // would rebuild from the same header fields and body hash.
         let body_hash_hex = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body));
         let canonical = canonical_message(
             "POST",
