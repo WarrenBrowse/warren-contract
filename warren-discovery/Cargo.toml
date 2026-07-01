@@ -1,0 +1,20 @@
+[package]
+name = "warren-discovery"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.89"
+license = "AGPL-3.0-or-later"
+description = "Warren relay-list discovery: signed relay-list verify + weighted exit selection (client), and relay-list/roster signing (server, signing key supplied by the caller). Single implementation shared by the client SDK and the backend."
+repository = "https://github.com/WarrenBrowse/warren-contract"
+publish = false
+
+[dependencies]
+warren-contract = { path = ".." }
+warrenguard-wire = { path = "../../warrenguard/crates/warrenguard-wire" }
+warrenguard-multihop = { path = "../../warrenguard/crates/warrenguard-multihop" }
+ed25519-dalek = { version = "2", features = ["zeroize", "rand_core"] }
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+thiserror = "2"

@@ -8,6 +8,9 @@ description = "Warren client<->server contract: the SS58 identity codec and the 
 repository = "https://github.com/WarrenBrowse/warren-contract"
 publish = false
 
+[workspace]
+members = ["warren-discovery"]
+
 [dependencies]
 bs58 = "0.5"
 blake2 = "0.10"
