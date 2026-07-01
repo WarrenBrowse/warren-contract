@@ -48,6 +48,9 @@ jobs:
             URL="git@github.com:WarrenBrowse/warrenguard.git"
           fi
           rm -rf ../warrenguard
+          # cargo ships GitHub's host key built in but plain git does not, so
+          # pin-on-first-use here instead of failing on an empty known_hosts.
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
           git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
           echo "==> warrenguard checked out at $(git -C ../warrenguard rev-parse --short HEAD)"
