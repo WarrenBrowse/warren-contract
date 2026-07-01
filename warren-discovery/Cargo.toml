@@ -18,3 +18,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 thiserror = "2"
+
+[features]
+# Exposes directory-minting fixtures for OTHER crates' tests (e.g. the SDK
+# facade). Off by default so these never enter the production-compiled surface.
+test-helpers = []

@@ -16,6 +16,10 @@
 mod error;
 mod json_io;
 mod multihop_directory;
+
+/// Directory-minting fixtures for other crates' tests (behind `test-helpers`).
+#[cfg(feature = "test-helpers")]
+pub use multihop_directory::test_helpers;
 mod query;
 mod relay;
 mod roster;

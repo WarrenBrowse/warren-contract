@@ -601,6 +601,86 @@ impl VerifiedMultiHopDirectory {
     }
 }
 
+/// Directory-minting fixtures for other crates' tests (the SDK facade), gated
+/// behind the `test-helpers` feature so they never enter production builds.
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers {
+    use ed25519_dalek::{Signer, SigningKey};
+    use warrenguard_multihop::{
+        ExitId, exit_descriptor_signing_payload, relay_descriptor_signing_payload,
+        sign_node_attestation, sign_operational_cert,
+    };
+
+    use super::{ExitDescriptorSigned, NodeEntry, RelayDescriptorSigned, sign_multihop_directory};
+
+    fn vouched_node(op: &SigningKey, tag: u8, country: &str, asn: u32) -> NodeEntry {
+        let endpoint: std::net::SocketAddr = format!("198.51.100.{tag}:443").parse().unwrap();
+        let relay_id = [tag; 16];
+        let relay_ed = [tag.wrapping_add(1); 32];
+        let relay_sig = op
+            .sign(&relay_descriptor_signing_payload(&relay_id, &relay_ed))
+            .to_bytes();
+        let relay = RelayDescriptorSigned {
+            relay_id,
+            relay_ed25519_pubkey: relay_ed,
+            endpoint,
+            cover_domain: None,
+            signature: relay_sig,
+        };
+        let exit_id = ExitId::from_bytes([tag; 16]);
+        let exit_x = [tag.wrapping_add(2); 32];
+        let exit_sig = op
+            .sign(&exit_descriptor_signing_payload(exit_id, &exit_x))
+            .to_bytes();
+        let exit = ExitDescriptorSigned {
+            exit_id,
+            exit_ed25519_pubkey: relay_ed,
+            exit_x25519_multihop_pubkey: exit_x,
+            endpoint: Some(endpoint),
+            cover_domain: None,
+            signature: exit_sig,
+            dns_disabled: false,
+        };
+        let attestation = sign_node_attestation(op, &relay_id, &relay_ed, asn, country);
+        NodeEntry {
+            relay,
+            exit,
+            country: country.to_owned(),
+            city: "City".to_owned(),
+            asn,
+            weight: 100,
+            attestation_hex: hex::encode(attestation),
+        }
+    }
+
+    /// Mints a signed multi-hop directory JSON with two fully-vouched exits.
+    #[must_use]
+    pub fn mint_directory_json(
+        root: &SigningKey,
+        op: &SigningKey,
+        server: &SigningKey,
+        generation: u64,
+        signed_at: u64,
+        expires_at: u64,
+    ) -> String {
+        let nodes = vec![
+            vouched_node(op, 10, "RO", 100),
+            vouched_node(op, 20, "NL", 200),
+        ];
+        let cert = sign_operational_cert(root, &op.verifying_key());
+        let signed = sign_multihop_directory(
+            nodes,
+            server,
+            &op.verifying_key(),
+            &cert,
+            generation,
+            signed_at,
+            expires_at,
+        );
+        serde_json::to_string(&signed).expect("serialize minted directory")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
