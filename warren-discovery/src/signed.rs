@@ -202,6 +202,8 @@ pub struct VerifiedRelayList {
     pub signed_at: u64,
     /// Unix epoch seconds after which the list is stale.
     pub expires_at: u64,
+    /// Hex of the server key that signed this list (for TOFU pinning).
+    pub server_pubkey_hex: String,
 }
 
 impl VerifiedRelayList {
@@ -382,6 +384,7 @@ pub fn verify_signed_relay_list_any(
         generation: signed.generation,
         signed_at: signed.signed_at,
         expires_at: signed.expires_at,
+        server_pubkey_hex: signed.server_pubkey_hex,
     })
 }
 
@@ -553,6 +556,10 @@ mod tests {
         assert_eq!(
             verified.expires_at, 1_700_086_400,
             "expiry surfaced to caller"
+        );
+        assert_eq!(
+            verified.server_pubkey_hex, expected_pubkey,
+            "signer key surfaced to caller for TOFU pinning"
         );
     }
 
