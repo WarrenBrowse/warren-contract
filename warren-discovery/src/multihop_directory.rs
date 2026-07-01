@@ -552,6 +552,55 @@ fn decode_signature(hex_str: &str) -> Result<Signature, DirectoryError> {
     Ok(Signature::from_bytes(&bytes))
 }
 
+/// A trusted exit projected from a verified multi-hop directory: the flat,
+/// client-facing dial view. Every node kept here passed the full operational +
+/// attestation checks, including the anti-downgrade DNS-attestation policy in
+/// [`node_fully_vouched`], so `dns_disabled` is trustworthy.
+#[derive(Debug, Clone)]
+pub struct VerifiedExit {
+    /// 16-byte exit identifier (cleartext routing key for the frame).
+    pub exit_id: [u8; 16],
+    /// The exit's Ed25519 identity (TLS RPK).
+    pub exit_ed25519_pubkey: [u8; 32],
+    /// The exit's long-lived X25519 HPKE recipient key.
+    pub exit_x25519_multihop_pubkey: [u8; 32],
+    /// Entry-relay QUIC endpoint to dial (v7 redacts the exit egress IP; the
+    /// client always dials the entry hop).
+    pub endpoint: std::net::SocketAddr,
+    /// ISO 3166-1 alpha-2 country.
+    pub country: String,
+    /// City.
+    pub city: String,
+    /// Selection weight.
+    pub weight: u64,
+    /// The exit runs no in-tunnel DNS forwarder (trustworthy: unattested
+    /// `dns_disabled` exits are dropped by [`node_fully_vouched`]).
+    pub dns_disabled: bool,
+    /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
+    pub cover_domain: Option<String>,
+}
+
+impl VerifiedMultiHopDirectory {
+    /// The trusted exits as a flat client dial view.
+    #[must_use]
+    pub fn exits(&self) -> Vec<VerifiedExit> {
+        self.nodes
+            .iter()
+            .map(|n| VerifiedExit {
+                exit_id: *n.exit.exit_id.as_bytes(),
+                exit_ed25519_pubkey: n.exit.exit_ed25519_pubkey,
+                exit_x25519_multihop_pubkey: n.exit.exit_x25519_multihop_pubkey,
+                endpoint: n.relay.endpoint,
+                country: n.country.clone(),
+                city: n.city.clone(),
+                weight: n.weight,
+                dns_disabled: n.exit.dns_disabled,
+                cover_domain: n.relay.cover_domain.clone(),
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -774,6 +823,19 @@ mod tests {
         assert_eq!(v.nodes.len(), 1, "only the honest DNS-enabled node kept");
         assert_eq!(v.dropped, 1);
         assert_eq!(v.nodes[0].country, "fr");
+    }
+
+    #[test]
+    fn exits_projection_flattens_verified_nodes() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 7, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)]).unwrap();
+        let exits = v.exits();
+        assert_eq!(exits.len(), 1);
+        assert_eq!(exits[0].country, "fr");
+        assert_eq!(exits[0].exit_id, [7u8; 16]);
+        assert!(!exits[0].dns_disabled);
     }
 
     #[test]
