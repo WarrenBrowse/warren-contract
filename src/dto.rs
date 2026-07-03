@@ -1184,7 +1184,9 @@ pub struct AdminRolloutResponse {
 pub struct AdminRolloutAuditRow {
     /// Unix epoch seconds of the action.
     pub at: u64,
-    /// Admin pubkey prefix or `controller`.
+    /// Who acted: a redacted admin pubkey prefix, `controller` (the
+    /// background rollout controller), or `node` (a node self-reporting
+    /// an update failure).
     pub actor: String,
     /// Action token.
     pub action: String,
