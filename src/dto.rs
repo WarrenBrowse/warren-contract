@@ -596,6 +596,16 @@ impl fmt::Debug for RegisterAccountRequest {
 pub struct RegisterAccountResponse {
     /// Unix epoch seconds at which the new subscription expires.
     pub expires_at: u64,
+    /// Seconds THIS redemption added to the account (the voucher's own
+    /// granted duration), independent of any pre-existing balance. The
+    /// client shows it as "X was added"; deriving it from
+    /// `expires_at - now` would instead report the account's TOTAL
+    /// remaining time and mislead a user who still had time left.
+    /// `#[serde(default)]` keeps wire-compat with servers that pre-date
+    /// the field (an older server yields 0, so the client falls back to
+    /// showing no added-duration line rather than a wrong number).
+    #[serde(default)]
+    pub added_secs: u64,
 }
 
 /// `GET /v1/subscription` response.
@@ -2340,6 +2350,31 @@ mod tests {
         assert_eq!(json, r#"{"expires_at":1700000000}"#);
         let parsed: SubscriptionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.expires_at, original.expires_at);
+    }
+
+    #[test]
+    fn register_account_response_round_trip_carries_added_secs() {
+        let original = RegisterAccountResponse {
+            expires_at: 1_700_000_000,
+            added_secs: 2_592_000,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            json, r#"{"expires_at":1700000000,"added_secs":2592000}"#,
+            "added_secs must be on the wire so the client shows the real granted duration"
+        );
+        let parsed: RegisterAccountResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn register_account_response_defaults_added_secs_for_older_servers() {
+        // A server that pre-dates the field emits only `expires_at`; the
+        // client must still deserialize (added_secs falls back to 0).
+        let parsed: RegisterAccountResponse =
+            serde_json::from_str(r#"{"expires_at":1700000000}"#).unwrap();
+        assert_eq!(parsed.expires_at, 1_700_000_000);
+        assert_eq!(parsed.added_secs, 0);
     }
 
     #[test]
