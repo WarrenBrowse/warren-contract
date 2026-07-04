@@ -1271,6 +1271,27 @@ pub struct AdminVoucherRow {
     /// pre-date the cancel feature.
     #[serde(default)]
     pub cancelled_at: Option<u64>,
+    /// How many distinct accounts may redeem this voucher, each at most
+    /// once. `Some(1)` = classic single-use; `None` = unlimited
+    /// campaign. Defaults to `Some(1)` when the server pre-dates
+    /// campaign vouchers (everything it mints is single-use).
+    #[serde(default = "default_single_use")]
+    pub max_redemptions: Option<u64>,
+    /// `Some(unix)` deadline after which the voucher is no longer
+    /// redeemable. Campaign vouchers always carry one.
+    #[serde(default)]
+    pub valid_until: Option<u64>,
+    /// Distinct accounts that consumed this voucher through the
+    /// multi-redemption gate (always 0 for single-use vouchers, whose
+    /// consumption is `redeemed_at`/`is_redeemed`).
+    #[serde(default)]
+    pub redemptions_count: u64,
+}
+
+/// Serde default for [`AdminVoucherRow::max_redemptions`]: a server
+/// that omits the field pre-dates campaigns and only mints single-use.
+fn default_single_use() -> Option<u64> {
+    Some(1)
 }
 
 /// Response for `GET /v1/admin/vouchers`.
@@ -1343,6 +1364,18 @@ pub struct AdminCreateVoucherRequest {
     pub duration_secs: u64,
     /// Payment channel.
     pub payment_method: PaymentMethod,
+    /// Account quota: absent = 1 (single-use), N >= 1 otherwise.
+    /// Mutually exclusive with `unlimited_redemptions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_redemptions: Option<u64>,
+    /// `true` = no account quota (the mandatory deadline is the
+    /// limiter). Mutually exclusive with `max_redemptions`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unlimited_redemptions: bool,
+    /// Redemption deadline (unix seconds). MANDATORY whenever the
+    /// quota is not 1; the server refuses a deadline-less campaign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until_unix_secs: Option<u64>,
 }
 
 /// Response from `POST /v1/admin/vouchers`. The secret is shown
@@ -1356,6 +1389,13 @@ pub struct AdminCreateVoucherResponse {
     pub secret_hash_hex: String,
     /// Echo of the granted duration.
     pub duration_secs: u64,
+    /// Echo of the account quota (`None` = unlimited). Defaults to
+    /// single-use when the server pre-dates campaign vouchers.
+    #[serde(default = "default_single_use")]
+    pub max_redemptions: Option<u64>,
+    /// Echo of the redemption deadline, when one was set.
+    #[serde(default)]
+    pub valid_until_unix_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2370,6 +2410,9 @@ mod tests {
                     PubkeySs58::try_from(crate::ss58::encode(&[0x22; 32])).expect("valid SS58"),
                 ),
                 cancelled_at: None,
+                max_redemptions: Some(1),
+                valid_until: None,
+                redemptions_count: 0,
             }],
             port_forwards: vec![AdminPortForwardRow {
                 client_pubkey_ss58: Some(
