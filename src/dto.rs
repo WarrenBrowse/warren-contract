@@ -874,6 +874,12 @@ pub struct RegisterExitRequest {
     /// per-client data (doc 52 invariant I2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<ExitTelemetry>,
+    /// First-boot hardware qualification verdict (doc 57). Reported once the
+    /// node's self-bench has run (a few seconds after boot); `None` before then
+    /// and from an exit binary that pre-dates the self-bench. Sticky server-side
+    /// (a heartbeat that omits it must not blank a stored verdict).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwqual: Option<ExitHwQual>,
 }
 
 /// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
@@ -931,6 +937,106 @@ pub struct ExitTelemetry {
     /// Clients still connected while this exit drains (ADR 36 §6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_clients_remaining: Option<u32>,
+}
+
+/// Go/no-go verdict of the exit's first-boot hardware qualification (doc 57).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitHwQualVerdict {
+    /// The hardware is fit for a production exit slot.
+    Go,
+    /// The hardware is NOT fit (see `ExitHwQual::reasons`).
+    NoGo,
+}
+
+/// First-boot hardware qualification of an exit node (doc 57). The node
+/// self-benches its OWN hardware once and reports the verdict so the control
+/// plane and the admin panel can decide whether the server is fit for a
+/// production exit slot. Contains only hardware characteristics: no user data,
+/// no traffic, no secrets (no-log safe, doc 52 invariant I2 style). Reported on
+/// the heartbeat; `None` from an exit that pre-dates the self-bench.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExitHwQual {
+    /// Go/no-go for a production exit slot.
+    pub verdict: ExitHwQualVerdict,
+    /// Informational capacity class: `entry` / `standard` / `high` / `unfit`.
+    pub capacity_class: String,
+    /// Conservative estimated clean single-tunnel throughput (Gbit/s). A
+    /// labelled heuristic, not a guarantee.
+    pub est_clean_tunnel_gbps: f32,
+    /// Semicolon-joined NO_GO reasons; empty on GO.
+    #[serde(default)]
+    pub reasons: String,
+    /// CPU model string, e.g. `AMD EPYC 4484PX 12-Core Processor`.
+    pub cpu_model: String,
+    /// Logical core count.
+    pub cpu_cores: u32,
+    /// Whether the CPU exposes AES-NI (hardware AES). Absent = crypto wall.
+    pub aes_ni: bool,
+    /// AES-256-GCM single-thread throughput at 16 KiB blocks (Gbit/s).
+    pub aes256gcm_gbps_per_core: f32,
+    /// Public NIC interface name.
+    pub nic_iface: String,
+    /// NIC link speed (Mbit/s); 0 when unknown.
+    pub nic_speed_mbps: u32,
+    /// Single-core UDP loopback packet rate: the datapath predictor.
+    pub udp_loopback_pps: u32,
+    /// Single-core UDP loopback throughput (Gbit/s).
+    pub udp_loopback_gbps: f32,
+    /// Unix epoch seconds when the bench ran.
+    pub measured_at: u64,
+}
+
+impl ExitHwQual {
+    /// Minimum single-core UDP-loopback packet rate for a prod exit: below this
+    /// the datapath predicts under ~1.3 Gbit/s clean single-tunnel (doc 57 §3).
+    pub const MIN_UDP_PPS: u32 = 120_000;
+    /// Minimum NIC link speed for a prod exit (Mbit/s).
+    pub const MIN_NIC_MBPS: u32 = 1000;
+    /// Minimum logical cores.
+    pub const MIN_CORES: u32 = 2;
+
+    /// Pure go/no-go evaluation from the raw hardware metrics (doc 57 §3). Sets
+    /// `verdict`, `reasons`, `capacity_class` and `est_clean_tunnel_gbps`; the
+    /// caller fills the measured fields first. Kept pure and total for testing.
+    #[must_use]
+    pub fn evaluate(mut self) -> Self {
+        let mut reasons: Vec<&str> = Vec::new();
+        if !self.aes_ni {
+            reasons.push("no AES-NI (userspace QUIC crypto would bottleneck)");
+        }
+        if self.nic_speed_mbps < Self::MIN_NIC_MBPS {
+            reasons.push("NIC below 1 Gbit/s (need >=1G for a prod exit)");
+        }
+        if self.cpu_cores < Self::MIN_CORES {
+            reasons.push("fewer than 2 cores");
+        }
+        if self.udp_loopback_pps < Self::MIN_UDP_PPS {
+            reasons.push("UDP loopback below 120k pps (datapath too slow)");
+        }
+        self.verdict = if reasons.is_empty() {
+            ExitHwQualVerdict::Go
+        } else {
+            ExitHwQualVerdict::NoGo
+        };
+        self.reasons = reasons.join("; ");
+        self.capacity_class = match self.verdict {
+            ExitHwQualVerdict::NoGo => "unfit",
+            ExitHwQualVerdict::Go if self.nic_speed_mbps >= 10_000 && self.udp_loopback_pps >= 250_000 => "high",
+            ExitHwQualVerdict::Go if self.nic_speed_mbps >= 2500 => "standard",
+            ExitHwQualVerdict::Go => "entry",
+        }
+        .to_string();
+        // Estimated clean single-tunnel = min(NIC, single-core datapath x the
+        // measured multi-queue uplift ~2x), 0 on NO_GO.
+        self.est_clean_tunnel_gbps = if self.verdict == ExitHwQualVerdict::NoGo {
+            0.0
+        } else {
+            let nic = self.nic_speed_mbps as f32 / 1000.0;
+            (self.udp_loopback_gbps * 2.0).min(nic)
+        };
+        self
+    }
 }
 
 /// `POST /v1/exits/register` response body (ADR 36). The heartbeat is the
@@ -1167,6 +1273,11 @@ pub struct AdminExitRow {
     /// clients dial the node in X.509 mode. `None` for RPK exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_domain: Option<String>,
+    /// First-boot hardware qualification verdict the exit last reported
+    /// (doc 57), surfaced on the admin exit-detail page. `None` if the node has
+    /// not reported one (legacy binary, or the self-bench has not run yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwqual: Option<ExitHwQual>,
 }
 
 /// Admin row of one uploaded exit release (doc 54).
@@ -2715,6 +2826,7 @@ mod tests {
             active_sessions: None,
             cover_domain: None,
             update_status: None,
+            hwqual: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -2755,6 +2867,7 @@ mod tests {
             active_sessions: None,
             cover_domain: None,
             update_status: None,
+            hwqual: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -2795,6 +2908,7 @@ mod tests {
             active_sessions: None,
             cover_domain: None,
             update_status: None,
+            hwqual: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -2825,6 +2939,7 @@ mod tests {
             active_sessions: None,
             cover_domain: None,
             update_status: None,
+            hwqual: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -2840,6 +2955,69 @@ mod tests {
             parsed.version.is_none(),
             "legacy heartbeat without version must decode to None"
         );
+    }
+
+    fn sample_hwqual() -> ExitHwQual {
+        ExitHwQual {
+            verdict: ExitHwQualVerdict::Go,
+            capacity_class: String::new(),
+            est_clean_tunnel_gbps: 0.0,
+            reasons: String::new(),
+            cpu_model: "AMD EPYC 4484PX 12-Core Processor".to_owned(),
+            cpu_cores: 24,
+            aes_ni: true,
+            aes256gcm_gbps_per_core: 45.2,
+            nic_iface: "eno1".to_owned(),
+            nic_speed_mbps: 10_000,
+            udp_loopback_pps: 328_000,
+            udp_loopback_gbps: 3.68,
+            measured_at: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn hwqual_evaluate_marks_a_capable_box_go_high_class() {
+        let q = sample_hwqual().evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::Go);
+        assert_eq!(q.capacity_class, "high", "10G NIC + >=250k pps is high class");
+        assert!(q.reasons.is_empty());
+        assert!(
+            q.est_clean_tunnel_gbps > 7.0 && q.est_clean_tunnel_gbps <= 10.0,
+            "estimate tracks 2x single-core capped at NIC, got {}",
+            q.est_clean_tunnel_gbps
+        );
+    }
+
+    #[test]
+    fn hwqual_evaluate_fails_a_box_without_aes_ni() {
+        let mut q = sample_hwqual();
+        q.aes_ni = false;
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::NoGo);
+        assert_eq!(q.capacity_class, "unfit");
+        assert!(q.reasons.contains("AES-NI"), "reason names the missing AES-NI");
+        assert_eq!(q.est_clean_tunnel_gbps, 0.0, "NO_GO reports zero capacity");
+    }
+
+    #[test]
+    fn hwqual_evaluate_fails_a_slow_datapath() {
+        let mut q = sample_hwqual();
+        q.udp_loopback_pps = 90_000; // below the 120k floor
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::NoGo);
+        assert!(q.reasons.contains("120k"), "reason names the pps floor");
+    }
+
+    #[test]
+    fn hwqual_round_trips_and_omits_none_on_register() {
+        let q = sample_hwqual().evaluate();
+        let json = serde_json::to_string(&q).unwrap();
+        let parsed: ExitHwQual = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, q, "ExitHwQual survives the wire round-trip");
+        // Absent on a legacy heartbeat -> None (no field required on the wire).
+        let legacy = r#"{"endpoints":[{"addr":"198.51.100.1","family":"ipv4","ingress":true,"egress":true,"listeners":[]}],"country":"FR","city":"Paris","weight":100,"active":true}"#;
+        let req: RegisterExitRequest = serde_json::from_str(legacy).unwrap();
+        assert!(req.hwqual.is_none(), "legacy heartbeat has no hwqual");
     }
 
     #[test]
