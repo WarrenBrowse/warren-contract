@@ -165,3 +165,85 @@ fn legacy_register_exit_request_without_update_status_still_parses() {
         "absent update_status must parse as None"
     );
 }
+
+#[test]
+fn legacy_register_exit_request_without_telemetry_still_parses() {
+    // Wire-compat: exits that pre-date the telemetry block omit the field.
+    let legacy = serde_json::json!({
+        "endpoints": [],
+        "country": "SG",
+        "city": "Singapore",
+        "weight": 100,
+    });
+    let req: RegisterExitRequest = serde_json::from_value(legacy).unwrap();
+    assert!(
+        req.telemetry.is_none(),
+        "absent telemetry must parse as None"
+    );
+}
+
+#[test]
+fn exit_telemetry_shape() {
+    // Counters are cumulative since process start; the server derives rates
+    // by delta and treats a decreasing counter as a process restart.
+    let full = ExitTelemetry {
+        bytes_tx_total: 10,
+        bytes_rx_total: 20,
+        datagrams_tx_total: 3,
+        datagrams_rx_total: 4,
+        clients_connected: 2,
+        handshakes_total: 7,
+        handshake_failures_total: 1,
+        rtt_p50_ms: Some(12),
+        rtt_p95_ms: Some(80),
+        quic_lost_packets_total: 5,
+        quic_congestion_events_total: 6,
+        cpu_percent: Some(37.5),
+        mem_rss_bytes: Some(52_428_800),
+        load1_milli: Some(410),
+        nic_tx_bytes_total: Some(1_000),
+        nic_rx_bytes_total: Some(2_000),
+        nic_speed_mbps: Some(1_000),
+        uptime_secs: 3_600,
+        drain_clients_remaining: None,
+    };
+    let v = json(&full);
+    assert_eq!(
+        v["bytes_tx_total"], 10,
+        "cumulative counters are plain u64 fields"
+    );
+    assert_eq!(v["rtt_p50_ms"], 12);
+    assert_eq!(
+        v.get("drain_clients_remaining"),
+        None,
+        "absent optional telemetry fields are omitted from the wire"
+    );
+    roundtrips(&full);
+
+    // A minimal block from a box where /proc sampling is unavailable.
+    let sparse = ExitTelemetry::default();
+    let v = json(&sparse);
+    assert_eq!(v["bytes_tx_total"], 0);
+    assert_eq!(v.get("cpu_percent"), None, "None system gauges are omitted");
+    roundtrips(&sparse);
+}
+
+#[test]
+fn register_exit_request_telemetry_roundtrips() {
+    let req = serde_json::json!({
+        "endpoints": [],
+        "country": "SG",
+        "city": "Singapore",
+        "weight": 100,
+        "telemetry": { "bytes_tx_total": 1, "bytes_rx_total": 2,
+            "datagrams_tx_total": 0, "datagrams_rx_total": 0,
+            "clients_connected": 1, "handshakes_total": 0,
+            "handshake_failures_total": 0, "quic_lost_packets_total": 0,
+            "quic_congestion_events_total": 0, "uptime_secs": 60 }
+    });
+    let parsed: RegisterExitRequest = serde_json::from_value(req).unwrap();
+    let telemetry = parsed.telemetry.expect("telemetry block must parse");
+    assert_eq!(telemetry.bytes_tx_total, 1);
+    assert_eq!(telemetry.clients_connected, 1);
+    assert!(telemetry.rtt_p50_ms.is_none());
+}

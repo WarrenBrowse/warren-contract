@@ -867,6 +867,70 @@ pub struct RegisterExitRequest {
     /// report. `None` from an exit that pre-dates the update agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_status: Option<ExitUpdateStatus>,
+    /// Per-node telemetry aggregates carried by the heartbeat (doc 52).
+    /// `None` from a legacy exit. Counters are cumulative since process
+    /// start: the server derives rates by delta and treats a decreasing
+    /// counter as a process restart. Node-level aggregates only, never
+    /// per-client data (doc 52 invariant I2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ExitTelemetry>,
+}
+
+/// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
+/// counters are always present (zero-valued when idle); system gauges are
+/// optional because /proc sampling can be unavailable or disabled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ExitTelemetry {
+    /// Datapath bytes to clients, summed over the node.
+    pub bytes_tx_total: u64,
+    /// Datapath bytes from clients, summed over the node.
+    pub bytes_rx_total: u64,
+    /// Datapath datagrams to clients, summed over the node.
+    pub datagrams_tx_total: u64,
+    /// Datapath datagrams from clients, summed over the node.
+    pub datagrams_rx_total: u64,
+    /// Live datapath connections. Distinct from `active_sessions`
+    /// (device-sessions) reported at the request level.
+    pub clients_connected: u32,
+    /// QUIC handshakes accepted since process start.
+    pub handshakes_total: u64,
+    /// QUIC handshakes that failed since process start.
+    pub handshake_failures_total: u64,
+    /// RTT percentiles over the live QUIC connections at sample time,
+    /// aggregated node-wide (never per client).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_p50_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 95th percentile RTT (same aggregation as `rtt_p50_ms`).
+    pub rtt_p95_ms: Option<u32>,
+    /// Packets QUIC declared lost, summed over live connections.
+    pub quic_lost_packets_total: u64,
+    /// Congestion events, summed over live connections.
+    pub quic_congestion_events_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Whole-box CPU utilisation percentage over the last sample tick.
+    pub cpu_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Resident set size of the exit process.
+    pub mem_rss_bytes: Option<u64>,
+    /// 1-minute load average, scaled by 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load1_milli: Option<u32>,
+    /// Public-NIC counters (whole interface, not just the tunnel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nic_tx_bytes_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Public-NIC receive counter (whole interface).
+    pub nic_rx_bytes_total: Option<u64>,
+    /// Public-NIC capacity in Mbit/s when the node knows it; otherwise the
+    /// fleet spec supplies it server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nic_speed_mbps: Option<u32>,
+    /// Seconds since the exit process started.
+    pub uptime_secs: u64,
+    /// Clients still connected while this exit drains (ADR 36 §6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_clients_remaining: Option<u32>,
 }
 
 /// `POST /v1/exits/register` response body (ADR 36). The heartbeat is the
@@ -2639,6 +2703,7 @@ mod tests {
             }],
         });
         let req = RegisterExitRequest {
+            telemetry: None,
             endpoints,
             country: CountryCode::try_from("FR").unwrap(),
             city: "Paris".to_owned(),
@@ -2678,6 +2743,7 @@ mod tests {
         // Exit binaries that mint an exit_id locally must be able to
         // send it on every heartbeat so the API persists the value.
         let req = RegisterExitRequest {
+            telemetry: None,
             endpoints: sample_endpoints(),
             country: CountryCode::try_from("FR").unwrap(),
             city: "Paris".to_owned(),
@@ -2717,6 +2783,7 @@ mod tests {
         // `skip_serializing_if = Option::is_none` keeps the on-wire shape
         // narrow when the optional fields are absent.
         let req = RegisterExitRequest {
+            telemetry: None,
             endpoints: sample_endpoints(),
             country: CountryCode::try_from("FR").unwrap(),
             city: "Paris".to_owned(),
@@ -2746,6 +2813,7 @@ mod tests {
         // heartbeat so the admin panel can display fleet deployment
         // state. Absent field (legacy binary) must decode to None.
         let req = RegisterExitRequest {
+            telemetry: None,
             endpoints: sample_endpoints(),
             country: CountryCode::try_from("FR").unwrap(),
             city: "Paris".to_owned(),
