@@ -1022,7 +1022,11 @@ impl ExitHwQual {
         self.reasons = reasons.join("; ");
         self.capacity_class = match self.verdict {
             ExitHwQualVerdict::NoGo => "unfit",
-            ExitHwQualVerdict::Go if self.nic_speed_mbps >= 10_000 && self.udp_loopback_pps >= 250_000 => "high",
+            ExitHwQualVerdict::Go
+                if self.nic_speed_mbps >= 10_000 && self.udp_loopback_pps >= 250_000 =>
+            {
+                "high"
+            }
             ExitHwQualVerdict::Go if self.nic_speed_mbps >= 2500 => "standard",
             ExitHwQualVerdict::Go => "entry",
         }
@@ -1036,6 +1040,33 @@ impl ExitHwQual {
             (self.udp_loopback_gbps * 2.0).min(nic)
         };
         self
+    }
+
+    /// Human-readable one-liner for logs and the admin panel. Hardware only, so
+    /// it is safe to log (no-log discipline).
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let verdict = match self.verdict {
+            ExitHwQualVerdict::Go => "GO",
+            ExitHwQualVerdict::NoGo => "NO_GO",
+        };
+        let reasons = if self.reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", self.reasons)
+        };
+        format!(
+            "{verdict}: {}-class, {}c {}, NIC {}Mb/s, AES-NI {} ({:.1}Gb/s/core), UDP-loop {}pps/{:.2}Gb/s, est ~{:.1}Gb/s clean single-tunnel{reasons}",
+            self.capacity_class,
+            self.cpu_cores,
+            self.cpu_model,
+            self.nic_speed_mbps,
+            if self.aes_ni { "yes" } else { "no" },
+            self.aes256gcm_gbps_per_core,
+            self.udp_loopback_pps,
+            self.udp_loopback_gbps,
+            self.est_clean_tunnel_gbps,
+        )
     }
 }
 
@@ -2979,7 +3010,10 @@ mod tests {
     fn hwqual_evaluate_marks_a_capable_box_go_high_class() {
         let q = sample_hwqual().evaluate();
         assert_eq!(q.verdict, ExitHwQualVerdict::Go);
-        assert_eq!(q.capacity_class, "high", "10G NIC + >=250k pps is high class");
+        assert_eq!(
+            q.capacity_class, "high",
+            "10G NIC + >=250k pps is high class"
+        );
         assert!(q.reasons.is_empty());
         assert!(
             q.est_clean_tunnel_gbps > 7.0 && q.est_clean_tunnel_gbps <= 10.0,
@@ -2995,7 +3029,10 @@ mod tests {
         let q = q.evaluate();
         assert_eq!(q.verdict, ExitHwQualVerdict::NoGo);
         assert_eq!(q.capacity_class, "unfit");
-        assert!(q.reasons.contains("AES-NI"), "reason names the missing AES-NI");
+        assert!(
+            q.reasons.contains("AES-NI"),
+            "reason names the missing AES-NI"
+        );
         assert_eq!(q.est_clean_tunnel_gbps, 0.0, "NO_GO reports zero capacity");
     }
 
