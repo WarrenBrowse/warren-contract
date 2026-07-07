@@ -26,6 +26,13 @@
 //!    operational key. Verified with [`warrenguard_multihop::verify_relay_descriptor`]
 //!    / [`warrenguard_multihop::verify_exit_descriptor`].
 //!
+//! **Accepted risk**: per-node `weight` and the `city` label are carried in
+//! the server envelope only; the operational attestation
+//! (`attestation_hex`) binds `country` / `asn` / the exit Ed25519 identity,
+//! not `weight` or `city`. A compromised **online** signer can therefore
+//! still steer client traffic weighting, or mislabel a node's city, without
+//! the offline operational key catching it.
+//!
 //! # Unified dual-role fleet
 //!
 //! Every node is **both** relay and exit. A [`NodeEntry`] carries both
@@ -39,16 +46,18 @@
 //! # `/v1` contract
 //!
 //! Canonical signing preimage field order is frozen (see
-//! [`UnsignedMultiHopDirectory`]); any mutation = v2 rotation, exactly
+//! `UnsignedMultiHopDirectory`); any mutation = v3 rotation, exactly
 //! like the signed relay list.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use warrenguard_multihop::{
     ExitDescAttestation, ExitDescriptorSigned, RelayDescriptorSigned,
     verify_exit_descriptor_with_dns_attestation, verify_node_attestation, verify_operational_cert,
     verify_relay_descriptor,
 };
+
+use crate::envelope;
 
 /// Current directory format version. Bumping = incompatible rotation.
 ///
@@ -110,12 +119,12 @@ pub struct SignedMultiHopDirectory {
     /// 64-char hex of the **server** (online) verifying key.
     pub server_pubkey_hex: String,
     /// 128-char hex Ed25519 signature of the **server** key over the
-    /// canonical bytes ([`UnsignedMultiHopDirectory`]).
+    /// canonical bytes (`UnsignedMultiHopDirectory`).
     pub signature_hex: String,
 }
 
 /// Canonical signing preimage for the server envelope. Field order frozen;
-/// any mutation = v2. Mirrors `signed::UnsignedRelayList`.
+/// any mutation = v3. Mirrors `signed::UnsignedRelayList`.
 #[derive(Debug, Serialize)]
 struct UnsignedMultiHopDirectory<'a> {
     version: u32,
@@ -161,6 +170,7 @@ impl VerifiedMultiHopDirectory {
 
 /// Errors raised verifying a [`SignedMultiHopDirectory`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DirectoryError {
     /// Invalid JSON or unexpected structure.
     #[error("invalid signed multi-hop directory: {0}")]
@@ -196,6 +206,11 @@ pub enum DirectoryError {
     /// root key (or no root pin was supplied and one is required).
     #[error("operational certificate does not verify under the pinned root")]
     BadOperationalCert,
+    /// A node descriptor in a [`MultiHopDirectoryDraft`] is not vouched for
+    /// by the claimed operational key: its relay descriptor, exit
+    /// descriptor, or geo/identity attestation does not verify under it.
+    #[error("node descriptor not vouched by the claimed operational key")]
+    NodeNotVouched,
     /// Re-serializing the parsed draft yielded different JSON than the raw
     /// input: this build dropped a field the publisher sent, i.e. the backend
     /// is older than the directory it is being asked to serve. See
@@ -205,6 +220,20 @@ pub enum DirectoryError {
          (warren-api is older than the directory / its warrenguard pin lags the publisher)"
     )]
     LossyRoundtrip,
+    /// The input exceeds the crate's pre-authentication size gate,
+    /// rejected before parsing to bound the allocation an untrusted
+    /// payload can force.
+    #[error("input exceeds the maximum allowed size")]
+    InputTooLarge,
+}
+
+impl From<envelope::DecodeError> for DirectoryError {
+    fn from(e: envelope::DecodeError) -> Self {
+        match e {
+            envelope::DecodeError::InvalidHex => Self::InvalidHex,
+            envelope::DecodeError::PubkeyNotOnCurve => Self::PubkeyNotOnCurve,
+        }
+    }
 }
 
 /// Fails when re-serializing a parsed [`MultiHopDirectoryDraft`] is LOSSY
@@ -223,9 +252,13 @@ pub enum DirectoryError {
 /// so equally lossless) is faithful too.
 ///
 /// # Errors
-/// [`DirectoryError::Json`] if `raw` is not a valid draft;
+/// [`DirectoryError::InputTooLarge`] if `raw` exceeds the pre-authentication
+/// size gate; [`DirectoryError::Json`] if `raw` is not a valid draft;
 /// [`DirectoryError::LossyRoundtrip`] if any field was dropped.
 pub fn ensure_lossless_roundtrip(raw: &[u8]) -> Result<(), DirectoryError> {
+    if raw.len() > envelope::MAX_VERIFY_INPUT_LEN {
+        return Err(DirectoryError::InputTooLarge);
+    }
     let original: serde_json::Value = serde_json::from_slice(raw)?;
     let draft: MultiHopDirectoryDraft = serde_json::from_value(original.clone())?;
     let reserialized = serde_json::to_value(&draft)?;
@@ -283,6 +316,23 @@ pub fn sign_multihop_directory(
     }
 }
 
+/// Single-pin convenience over [`verify_multihop_directory_any`]: verifies
+/// against at most one expected server pubkey and one expected root
+/// pubkey (`None` = TOFU for that pin). Mirrors the shape of
+/// [`crate::verify_signed_relay_list`] / [`crate::verify_roster`].
+///
+/// # Errors
+/// Same as [`verify_multihop_directory_any`].
+pub fn verify_multihop_directory(
+    s: &str,
+    expected_server_pubkey: Option<&str>,
+    expected_root_pubkey: Option<&str>,
+) -> Result<VerifiedMultiHopDirectory, DirectoryError> {
+    let servers: Vec<&str> = expected_server_pubkey.into_iter().collect();
+    let roots: Vec<&str> = expected_root_pubkey.into_iter().collect();
+    verify_multihop_directory_any(s, &servers, &roots)
+}
+
 /// Verifies a [`SignedMultiHopDirectory`] end to end:
 ///
 /// 1. version + server-pubkey pin (`expected_server_pubkeys`, empty = TOFU);
@@ -298,11 +348,12 @@ pub fn sign_multihop_directory(
 /// function clock-free.
 ///
 /// # Errors
-/// See [`DirectoryError`].
+/// See [`DirectoryError`]. Also returns [`DirectoryError::InputTooLarge`]
+/// if `s` exceeds the pre-authentication size gate.
 ///
 /// # Panics
 /// Panics only if re-serializing the already-deserialized
-/// [`UnsignedMultiHopDirectory`] to canonical JSON fails, which is
+/// `UnsignedMultiHopDirectory` to canonical JSON fails, which is
 /// impossible for a value that just round-tripped through `serde_json`
 /// (no maps with non-string keys, no non-finite floats).
 pub fn verify_multihop_directory_any(
@@ -310,6 +361,9 @@ pub fn verify_multihop_directory_any(
     expected_server_pubkeys: &[&str],
     expected_root_pubkeys: &[&str],
 ) -> Result<VerifiedMultiHopDirectory, DirectoryError> {
+    if s.len() > envelope::MAX_VERIFY_INPUT_LEN {
+        return Err(DirectoryError::InputTooLarge);
+    }
     let signed: SignedMultiHopDirectory = serde_json::from_str(s)?;
     if signed.version != MULTIHOP_DIRECTORY_VERSION {
         return Err(DirectoryError::UnsupportedVersion {
@@ -318,23 +372,14 @@ pub fn verify_multihop_directory_any(
     }
 
     // (1) server pubkey pin
-    if !expected_server_pubkeys.is_empty()
-        && !expected_server_pubkeys
-            .iter()
-            .any(|p| *p == signed.server_pubkey_hex)
-    {
-        return Err(DirectoryError::ServerPubkeyMismatch {
-            got: warren_contract::redact(&signed.server_pubkey_hex),
-            expected: expected_server_pubkeys
-                .iter()
-                .map(|p| warren_contract::redact(p))
-                .collect::<Vec<_>>()
-                .join(","),
-        });
+    if !envelope::pin_allows(expected_server_pubkeys, &signed.server_pubkey_hex) {
+        let (got, expected) =
+            envelope::redact_pin_mismatch(expected_server_pubkeys, &signed.server_pubkey_hex);
+        return Err(DirectoryError::ServerPubkeyMismatch { got, expected });
     }
 
     // (2) server envelope signature
-    let server_pubkey = decode_verifying_key(&signed.server_pubkey_hex)?;
+    let server_pubkey = envelope::decode_verifying_key(&signed.server_pubkey_hex)?;
     let canonical = {
         let unsigned = UnsignedMultiHopDirectory {
             version: signed.version,
@@ -349,13 +394,15 @@ pub fn verify_multihop_directory_any(
         serde_json::to_vec(&unsigned)
             .expect("UnsignedMultiHopDirectory JSON serialization is infallible")
     };
-    let envelope_sig = decode_signature(&signed.signature_hex)?;
+    let envelope_sig = envelope::decode_signature(&signed.signature_hex)?;
+    // verify_strict: defense in depth, rejects small-order/non-canonical
+    // signatures the basic verification equation would still accept.
     server_pubkey
-        .verify(&canonical, &envelope_sig)
+        .verify_strict(&canonical, &envelope_sig)
         .map_err(|_| DirectoryError::BadEnvelopeSignature)?;
 
     // (3) operational certificate against the pinned root
-    let operational_pubkey = decode_verifying_key(&signed.operational_pubkey_hex)?;
+    let operational_pubkey = envelope::decode_verifying_key(&signed.operational_pubkey_hex)?;
     let cert: [u8; 64] = hex::decode(&signed.operational_cert_hex)
         .map_err(|_| DirectoryError::InvalidHex)?
         .try_into()
@@ -365,7 +412,7 @@ pub fn verify_multihop_directory_any(
     } else {
         let mut ok = false;
         for root_hex in expected_root_pubkeys {
-            let Ok(root) = decode_verifying_key(root_hex) else {
+            let Ok(root) = envelope::decode_verifying_key(root_hex) else {
                 continue;
             };
             if verify_operational_cert(&root, &operational_pubkey, &cert).is_ok() {
@@ -432,18 +479,17 @@ impl MultiHopDirectoryDraft {
     /// # Errors
     /// - [`DirectoryError::InvalidHex`] / [`DirectoryError::PubkeyNotOnCurve`]
     ///   for malformed operational fields.
-    /// - [`DirectoryError::BadOperationalCert`] if any node descriptor
-    ///   does not verify under the operational key (variant reused to
-    ///   signal "descriptor not vouched by the claimed operational key").
+    /// - [`DirectoryError::NodeNotVouched`] if any node descriptor does
+    ///   not verify under the claimed operational key.
     pub fn validate_self_consistent(&self) -> Result<(), DirectoryError> {
-        let operational_pubkey = decode_verifying_key(&self.operational_pubkey_hex)?;
+        let operational_pubkey = envelope::decode_verifying_key(&self.operational_pubkey_hex)?;
         let _cert: [u8; 64] = hex::decode(&self.operational_cert_hex)
             .map_err(|_| DirectoryError::InvalidHex)?
             .try_into()
             .map_err(|_| DirectoryError::InvalidHex)?;
         for node in &self.nodes {
             if !node_fully_vouched(&operational_pubkey, node) {
-                return Err(DirectoryError::BadOperationalCert);
+                return Err(DirectoryError::NodeNotVouched);
             }
         }
         Ok(())
@@ -465,7 +511,7 @@ pub fn sign_directory_draft(
     signed_at: u64,
     expires_at: u64,
 ) -> Result<SignedMultiHopDirectory, DirectoryError> {
-    let operational_pubkey = decode_verifying_key(&draft.operational_pubkey_hex)?;
+    let operational_pubkey = envelope::decode_verifying_key(&draft.operational_pubkey_hex)?;
     let cert: [u8; 64] = hex::decode(&draft.operational_cert_hex)
         .map_err(|_| DirectoryError::InvalidHex)?
         .try_into()
@@ -489,7 +535,7 @@ pub fn sign_directory_draft(
 /// `relay.endpoint` is kept); only the auth-gated relay-facing directory
 /// carries the exit endpoint. Because `endpoint` is **not** under the
 /// operational descriptor signature, redacting it leaves
-/// [`verify_exit_descriptor`] (and the whole per-node chain) valid. The
+/// `verify_exit_descriptor` (and the whole per-node chain) valid. The
 /// server envelope is recomputed over the redacted nodes at serve time
 /// ([`sign_directory_draft`]), so the client copy verifies end to end.
 ///
@@ -541,26 +587,10 @@ fn node_fully_vouched(operational_pubkey: &VerifyingKey, node: &NodeEntry) -> bo
     .is_ok()
 }
 
-fn decode_verifying_key(hex_str: &str) -> Result<VerifyingKey, DirectoryError> {
-    let bytes: [u8; 32] = hex::decode(hex_str)
-        .map_err(|_| DirectoryError::InvalidHex)?
-        .try_into()
-        .map_err(|_| DirectoryError::InvalidHex)?;
-    VerifyingKey::from_bytes(&bytes).map_err(|_| DirectoryError::PubkeyNotOnCurve)
-}
-
-fn decode_signature(hex_str: &str) -> Result<Signature, DirectoryError> {
-    let bytes: [u8; 64] = hex::decode(hex_str)
-        .map_err(|_| DirectoryError::InvalidHex)?
-        .try_into()
-        .map_err(|_| DirectoryError::InvalidHex)?;
-    Ok(Signature::from_bytes(&bytes))
-}
-
 /// A trusted exit projected from a verified multi-hop directory: the flat,
 /// client-facing dial view. Every node kept here passed the full operational +
 /// attestation checks, including the anti-downgrade DNS-attestation policy in
-/// [`node_fully_vouched`], so `dns_disabled` is trustworthy.
+/// `node_fully_vouched`, so `dns_disabled` is trustworthy.
 #[derive(Debug, Clone)]
 pub struct VerifiedExit {
     /// 16-byte exit identifier (cleartext routing key for the frame).
@@ -579,7 +609,7 @@ pub struct VerifiedExit {
     /// Selection weight.
     pub weight: u64,
     /// The exit runs no in-tunnel DNS forwarder (trustworthy: unattested
-    /// `dns_disabled` exits are dropped by [`node_fully_vouched`]).
+    /// `dns_disabled` exits are dropped by `node_fully_vouched`).
     pub dns_disabled: bool,
     /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
     pub cover_domain: Option<String>,
@@ -996,7 +1026,7 @@ mod tests {
         let err = d
             .validate_self_consistent()
             .expect_err("rogue node draft must reject");
-        assert!(matches!(err, DirectoryError::BadOperationalCert));
+        assert!(matches!(err, DirectoryError::NodeNotVouched));
     }
 
     #[test]
@@ -1064,5 +1094,41 @@ mod tests {
             .expect("wrapped directory must verify");
         assert_eq!(v.generation, 9);
         assert_eq!(v.nodes.len(), 1);
+    }
+
+    #[test]
+    fn single_pin_convenience_matches_the_any_variant() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory(&json, Some(&hexk(&server)), Some(&hexk(&root)))
+            .expect("single-pin convenience must verify like verify_multihop_directory_any");
+        assert_eq!(v.nodes.len(), 1);
+        assert!(
+            verify_multihop_directory(&json, None, None).is_ok(),
+            "TOFU on both pins"
+        );
+    }
+
+    #[test]
+    fn verify_accepts_server_and_root_pins_differing_only_in_hex_case() {
+        // Mirrors release.rs's `eq_ignore_ascii_case` pin policy: legitimate
+        // server/root pins written in a different hex case must not be
+        // wrongly rejected.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let upper_server = hexk(&server).to_ascii_uppercase();
+        let upper_root = hexk(&root).to_ascii_uppercase();
+        verify_multihop_directory_any(&json, &[&upper_server], &[&upper_root])
+            .expect("pins differing only in hex case must still be accepted");
+    }
+
+    #[test]
+    fn verify_rejects_oversize_input() {
+        let oversize = "0".repeat(envelope::MAX_VERIFY_INPUT_LEN + 1);
+        let err =
+            verify_multihop_directory_any(&oversize, &[], &[]).expect_err("oversize must reject");
+        assert!(matches!(err, DirectoryError::InputTooLarge));
     }
 }

@@ -11,8 +11,8 @@
 //! client verifies with a known `server_pubkey` (TOFU at boot or
 //! hardcoded pin in prod).
 //!
-//! **Canonical format** (frozen at v7, NEVER modify without rotating
-//! to v8):
+//! **Canonical format** (frozen at v8; any further mutation must rotate
+//! to v9):
 //!
 //! ```text
 //! canonical_bytes = serde_json::to_vec(&UnsignedRelayList {
@@ -50,10 +50,11 @@
 
 use std::net::IpAddr;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use warrenguard_wire::ExitId;
 
+use crate::envelope;
 use crate::json_io::JsonError;
 use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 
@@ -75,6 +76,13 @@ use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 /// node-level capability booleans (`egress.ipv4`/`egress.ipv6`) with no
 /// egress address. Signing-canonical like every prior bump: lockstep
 /// rollout of warren-api, warren-relay-selector and warren-app required.
+///
+/// **v8 (cover-domain, ADR-0004/wg-0005)** adds the optional per-node
+/// `cover_domain`: the hostname on the exit's real X.509 certificate,
+/// appended last on [`JsonNode`] (additive, `skip_serializing_if` when
+/// absent) to keep pre-v8 canonical bytes reproducible for nodes without
+/// it. A node carrying it is dialed via WebPKI SNI instead of the raw
+/// Ed25519 public-key pin.
 pub const SIGNED_VERSION: u32 = 8;
 
 /// **Wire** dial listener: a `port` plus the wire `transport` and the
@@ -150,7 +158,7 @@ pub struct JsonNode {
     pub cover_domain: Option<String>,
 }
 
-/// **Signed** node list (full wire format, `relays.json` v7).
+/// **Signed** node list (full wire format, `relays.json` v8).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignedRelayList {
     /// Must equal [`SIGNED_VERSION`].
@@ -216,6 +224,7 @@ impl VerifiedRelayList {
 
 /// Extra errors specific to the signed format.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignedError {
     /// Invalid JSON or unexpected structure.
     #[error("invalid signed relay list: {0}")]
@@ -252,6 +261,20 @@ pub enum SignedError {
     /// Per-node parsing errors (invalid id / addr / family).
     #[error(transparent)]
     Relay(#[from] JsonError),
+    /// The input exceeds the crate's pre-authentication size gate,
+    /// rejected before parsing to bound the allocation an untrusted
+    /// payload can force.
+    #[error("input exceeds the maximum allowed size")]
+    InputTooLarge,
+}
+
+impl From<envelope::DecodeError> for SignedError {
+    fn from(e: envelope::DecodeError) -> Self {
+        match e {
+            envelope::DecodeError::InvalidHex => Self::InvalidHex,
+            envelope::DecodeError::PubkeyNotOnCurve => Self::PubkeyNotOnCurve,
+        }
+    }
 }
 
 /// Signs a node list with the server key. warren-api side only.
@@ -327,45 +350,31 @@ pub fn verify_signed_relay_list(
 /// `expected_server_pubkeys`. An empty slice means TOFU.
 ///
 /// # Errors
-/// Same as [`verify_signed_relay_list`].
+/// Same as [`verify_signed_relay_list`]. Also returns
+/// [`SignedError::InputTooLarge`] if `s` exceeds the pre-authentication
+/// size gate.
 pub fn verify_signed_relay_list_any(
     s: &str,
     expected_server_pubkeys: &[&str],
 ) -> Result<VerifiedRelayList, SignedError> {
+    if s.len() > envelope::MAX_VERIFY_INPUT_LEN {
+        return Err(SignedError::InputTooLarge);
+    }
     let signed: SignedRelayList = serde_json::from_str(s)?;
     if signed.version != SIGNED_VERSION {
         return Err(SignedError::UnsupportedVersion {
             got: signed.version,
         });
     }
-    if !expected_server_pubkeys.is_empty()
-        && !expected_server_pubkeys
-            .iter()
-            .any(|p| *p == signed.server_pubkey_hex)
-    {
-        return Err(SignedError::ServerPubkeyMismatch {
-            got: warren_contract::redact(&signed.server_pubkey_hex),
-            expected: expected_server_pubkeys
-                .iter()
-                .map(|p| warren_contract::redact(p))
-                .collect::<Vec<_>>()
-                .join(","),
-        });
+    if !envelope::pin_allows(expected_server_pubkeys, &signed.server_pubkey_hex) {
+        let (got, expected) =
+            envelope::redact_pin_mismatch(expected_server_pubkeys, &signed.server_pubkey_hex);
+        return Err(SignedError::ServerPubkeyMismatch { got, expected });
     }
 
     // Rebuild the canonical bytes and verify the crypto signature.
-    let pubkey_bytes: [u8; 32] = hex::decode(&signed.server_pubkey_hex)
-        .map_err(|_| SignedError::InvalidHex)?
-        .try_into()
-        .map_err(|_| SignedError::InvalidHex)?;
-    let server_pubkey =
-        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| SignedError::PubkeyNotOnCurve)?;
-
-    let sig_bytes: [u8; 64] = hex::decode(&signed.signature_hex)
-        .map_err(|_| SignedError::InvalidHex)?
-        .try_into()
-        .map_err(|_| SignedError::InvalidHex)?;
-    let signature = Signature::from_bytes(&sig_bytes);
+    let server_pubkey = envelope::decode_verifying_key(&signed.server_pubkey_hex)?;
+    let signature = envelope::decode_signature(&signed.signature_hex)?;
 
     let unsigned = UnsignedRelayList {
         version: signed.version,
@@ -377,8 +386,11 @@ pub fn verify_signed_relay_list_any(
     };
     let canonical = serde_json::to_vec(&unsigned).map_err(SignedError::Json)?;
 
+    // verify_strict (rather than verify) also rejects small-order and
+    // non-canonical S/R components: defense in depth on top of the basic
+    // signature equation.
     server_pubkey
-        .verify(&canonical, &signature)
+        .verify_strict(&canonical, &signature)
         .map_err(|_| SignedError::BadSignature)?;
 
     // Convert to a runtime WarrenRelayList.
@@ -772,9 +784,11 @@ mod tests {
     #[test]
     fn json_node_field_order_is_frozen_at_v8() {
         // Wire vector test: freeze the JsonNode + JsonEndpoint +
-        // JsonListener + JsonEgress + JsonLocation field order. Any drift
+        // JsonListener + JsonEgress + JsonLocation field order, including
+        // the v8 addition `cover_domain` (must serialize last). Any drift
         // changes the canonical signing bytes for every entry.
-        let node = sample_node();
+        let mut node = sample_node();
+        node.cover_domain = Some("cover.example.com".to_owned());
         let json = serde_json::to_string(&node).expect("ser");
         let expected = [
             r#""id":"#,
@@ -794,6 +808,7 @@ mod tests {
             r#""port":"#,
             r#""transport":"#,
             r#""alpn":"#,
+            r#""cover_domain":"#,
         ];
         let mut last = 0usize;
         for needle in expected {
@@ -894,5 +909,65 @@ mod tests {
         let json = serde_json::to_string(&signed).unwrap();
         verify_signed_relay_list_any(&json, &[])
             .expect("empty set = TOFU, any self-consistent sig");
+    }
+
+    #[test]
+    fn verify_accepts_a_pin_differing_only_in_hex_case() {
+        // The pin comparison must be case-insensitive, mirroring
+        // release.rs's `eq_ignore_ascii_case` policy: a legitimate pin
+        // written in a different hex case must not be wrongly rejected.
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).unwrap();
+        let upper_pin = hex::encode(key.verifying_key().as_bytes()).to_ascii_uppercase();
+        verify_signed_relay_list(&json, Some(&upper_pin))
+            .expect("a pin differing only in hex case must still be accepted");
+    }
+
+    #[test]
+    fn verify_rejects_oversize_input() {
+        let oversize = "0".repeat(envelope::MAX_VERIFY_INPUT_LEN + 1);
+        let err = verify_signed_relay_list(&oversize, None).expect_err("oversize must be rejected");
+        assert!(matches!(err, SignedError::InputTooLarge));
+    }
+
+    #[test]
+    fn golden_vector_v8_signed_relay_list_is_frozen() {
+        // Wire vector (rule 40): freeze today's exact signed bytes for a
+        // representative v8 list, including one node WITH cover_domain (the
+        // v8 addition), produced from a deterministic key. If this drifts,
+        // deployed clients stop verifying lists from this build: bump
+        // SIGNED_VERSION instead of mutating the canonical shape.
+        let key = SigningKey::from_bytes(&[0x07; 32]);
+        let mut node = sample_node();
+        node.cover_domain = Some("cover.example.com".to_owned());
+        let signed = sign_relay_list(vec![node], &key, 3, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).expect("serialize");
+
+        let expected = concat!(
+            "{\"version\":8,",
+            "\"nodes\":[{\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\",",
+            "\"exit_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+            "\"location\":{\"country\":\"FR\",\"city\":\"Paris\"},",
+            "\"weight\":100,",
+            "\"active\":true,",
+            "\"egress\":{\"ipv4\":true,\"ipv6\":false},",
+            "\"endpoints\":[{\"addr\":\"127.0.0.1\",\"family\":\"ipv4\",",
+            "\"listeners\":[{\"port\":443,\"transport\":\"quic\",\"alpn\":\"h3\"}]}],",
+            "\"cover_domain\":\"cover.example.com\"}],",
+            "\"generation\":3,",
+            "\"signed_at\":1700000000,",
+            "\"expires_at\":1700086400,",
+            "\"server_pubkey_hex\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\",",
+            "\"signature_hex\":\"a5bae5ceb3652c980951447d82e52d9424ccdd8017b524440658720834ae02f5",
+            "1062a32c328cee9dc7a8801ac39c52b749eef58eaeeb2dd258a2d455a429da0f\"}",
+        );
+        assert_eq!(
+            json, expected,
+            "signed relay-list v8 wire bytes drifted (wire break: bump SIGNED_VERSION)"
+        );
+
+        let pin = hex::encode(key.verifying_key().as_bytes());
+        verify_signed_relay_list(&json, Some(&pin)).expect("frozen vector must keep verifying");
     }
 }

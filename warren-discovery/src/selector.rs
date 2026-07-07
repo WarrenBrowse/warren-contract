@@ -3,8 +3,18 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt};
+use thiserror::Error;
 
-use crate::{SelectorError, WarrenRelay, WarrenRelayList, WarrenRelayQuery};
+use crate::{WarrenRelay, WarrenRelayList, WarrenRelayQuery};
+
+/// Errors returned by [`WarrenRelaySelector::select`].
+#[derive(Debug, Error)]
+pub enum SelectorError {
+    /// No active relay satisfies all query constraints (location,
+    /// ip_availability, weight > 0, ...).
+    #[error("no relay matches the query constraints")]
+    NoRelayMatch,
+}
 
 /// Selects a [`WarrenRelay`] from a [`WarrenRelayList`] based on the
 /// constraints of a [`WarrenRelayQuery`].
@@ -24,7 +34,8 @@ impl WarrenRelaySelector {
     ///
     /// Convenient for tests and cases where weighting is not required.
     /// For weighted selection by `weight`, use
-    /// [`Self::select_with_rng`].
+    /// [`Self::select_with_rng`]. Unlike the weighted path, a `weight == 0`
+    /// relay stays eligible here: this method never consults `weight`.
     ///
     /// # Errors
     ///
@@ -53,9 +64,9 @@ impl WarrenRelaySelector {
     /// # Panics
     ///
     /// Never panics in practice: the early `candidates.is_empty()` check
-    /// guarantees [`weighted_pick`]'s non-empty precondition, and the
+    /// guarantees `weighted_pick`'s non-empty precondition, and the
     /// `weight > 0` filter guarantees `total_weight > 0`. The internal
-    /// `unreachable!()` inside [`weighted_pick`] is defensive only.
+    /// `unreachable!()` inside `weighted_pick` is defensive only.
     pub fn select_with_rng<R: Rng + ?Sized>(
         &self,
         query: &WarrenRelayQuery,
@@ -185,11 +196,8 @@ impl WarrenRelaySelector {
     }
 }
 
-/// Weighted random pick over a non-empty candidate slice.
-///
-/// Pulled out of [`WarrenRelaySelector::select_with_rng`] so the
-/// failover path can reuse the same weighting logic without
-/// duplicating the loop.
+/// Weighted random pick over a non-empty candidate slice, shared by
+/// [`WarrenRelaySelector::select_with_rng`] and the failover path.
 ///
 /// # Panics
 ///
@@ -204,13 +212,60 @@ fn weighted_pick<'a, R: Rng + ?Sized>(
         !candidates.is_empty(),
         "weighted_pick MUST be called with at least one candidate"
     );
-    let total_weight: u64 = candidates.iter().map(|r| r.weight()).sum();
+    // `weight` is untrusted wire data (u64): summing in u64 can overflow
+    // (two relays near u64::MAX) which panics in debug and, in release,
+    // can wrap to a total of 0 and make `random_range(0..0)` panic. u128
+    // cannot overflow for any combination of u64 weights.
+    let total_weight: u128 = candidates.iter().map(|r| u128::from(r.weight())).sum();
     let mut roll = rng.random_range(0..total_weight);
     for relay in candidates {
-        if roll < relay.weight() {
+        let w = u128::from(relay.weight());
+        if roll < w {
             return relay;
         }
-        roll -= relay.weight();
+        roll -= w;
     }
     unreachable!("weighted_pick invariant violated: sum(weights) <= roll");
+}
+
+#[cfg(test)]
+mod tests {
+    use warrenguard_wire::{ExitId, WarrenPubkey};
+
+    use super::*;
+    use crate::{Addr, Ingress, Listener, Location};
+
+    fn relay(seed: u8, weight: u64) -> WarrenRelay {
+        WarrenRelay::from_public(
+            WarrenPubkey::from_bytes([seed; 32]),
+            ExitId::from_bytes([seed; 16]),
+            Location::new("fr", "Paris"),
+            weight,
+            true,
+            vec![Ingress::new(
+                Addr::new("1.2.3.4".parse().unwrap(), None),
+                vec![Listener::new(443, "quic", "h3")],
+            )],
+            true,
+            false,
+        )
+    }
+
+    #[test]
+    fn weighted_pick_does_not_panic_on_u64_max_weight_sum() {
+        // Regression: two relays at u64::MAX overflow a u64 weight sum
+        // (debug panic; release wraps and can make random_range(0..0)
+        // panic). Must draw a valid pick instead.
+        let list = WarrenRelayList::new(vec![relay(1, u64::MAX), relay(2, u64::MAX)]);
+        let selector = WarrenRelaySelector::new(list);
+        let mut rng = StdRng::seed_from_u64(0);
+        let picked = selector
+            .select_with_rng(&WarrenRelayQuery::any(), &mut rng)
+            .expect("a weighted pick must succeed without overflow");
+        assert!(
+            picked.exit_id() == ExitId::from_bytes([1; 16])
+                || picked.exit_id() == ExitId::from_bytes([2; 16]),
+            "pick must be one of the two candidates"
+        );
+    }
 }

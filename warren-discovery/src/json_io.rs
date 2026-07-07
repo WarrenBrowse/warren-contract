@@ -1,7 +1,7 @@
 //! Parsing of the `warren-relays.json` JSON format.
 //!
 //! Bootstrap (unsigned) format for the POC; mirrors the per-node shape
-//! of the signed v6 list. The production path uses the signed format
+//! of the signed v8 list. The production path uses the signed format
 //! ([`crate::signed`]); this is a local development / baked-bootstrap
 //! convenience.
 
@@ -14,7 +14,7 @@ use crate::signed::{JsonNode, json_node_to_warren};
 /// Supported JSON format version. Bump when the schema breaks
 /// forward compatibility (= an old parser cannot read a new file).
 ///
-/// **v4 (minimized node model)**: aligned with the signed v7 list; the
+/// **v4 (minimized node model)**: aligned with the signed v8 list; the
 /// root is `nodes`, each entry a minimized [`JsonNode`] (entry endpoints
 /// with listeners + node-level egress capability booleans; no roles, no
 /// per-endpoint geoip/flags). Was v3 (v6 node model), v2 (flat `relays`).
@@ -46,6 +46,12 @@ pub enum JsonError {
     /// with the parsed `addr`.
     #[error("invalid endpoint family (expected ipv4/ipv6 matching addr): {0}")]
     InvalidFamily(String),
+
+    /// The input exceeds the crate's pre-authentication size gate,
+    /// rejected before parsing to bound the allocation an untrusted
+    /// payload can force.
+    #[error("input exceeds the maximum allowed size")]
+    InputTooLarge,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -55,16 +61,21 @@ struct JsonRoot {
 }
 
 impl WarrenRelayList {
-    /// Parses a JSON string in the `warren-relays.json` v3 (node) format.
+    /// Parses a JSON string in the `warren-relays.json` v4 (node) format.
     ///
     /// # Errors
     ///
+    /// - [`JsonError::InputTooLarge`] if `s` exceeds the pre-authentication
+    ///   size gate.
     /// - [`JsonError::Json`] if the string is not valid JSON.
     /// - [`JsonError::UnsupportedVersion`] if `version != SUPPORTED_VERSION`.
     /// - [`JsonError::InvalidEndpointId`] if a node `id` is malformed.
     /// - [`JsonError::InvalidIpAddr`] / [`JsonError::InvalidFamily`] on a
     ///   malformed endpoint address or family.
     pub fn from_json_str(s: &str) -> Result<Self, JsonError> {
+        if s.len() > crate::envelope::MAX_VERIFY_INPUT_LEN {
+            return Err(JsonError::InputTooLarge);
+        }
         let root: JsonRoot = serde_json::from_str(s)?;
         if root.version != SUPPORTED_VERSION {
             return Err(JsonError::UnsupportedVersion(root.version));

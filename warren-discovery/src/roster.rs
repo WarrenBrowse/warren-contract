@@ -22,11 +22,11 @@
 //! it changes rarely (only when an exit is added/removed/rotated), so its
 //! expiry window is long.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
-use warrenguard_wire::ExitId;
+use warrenguard_wire::{ExitId, WarrenPubkey};
 
-use crate::signed::SignedError;
+use crate::envelope;
 use crate::{WarrenRelay, WarrenRelayList};
 
 /// Current roster format version. Bumping = incompatible rotation.
@@ -80,6 +80,54 @@ struct UnsignedRoster<'a> {
     admin_pubkey_hex: &'a str,
 }
 
+/// Errors specific to the roster format.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RosterError {
+    /// Invalid JSON or unexpected structure.
+    #[error("invalid signed roster: {0}")]
+    Json(#[from] serde_json::Error),
+    /// `version != ROSTER_VERSION`.
+    #[error("unsupported roster version: {got} (expected {})", ROSTER_VERSION)]
+    UnsupportedVersion {
+        /// Version actually received in the JSON.
+        got: u32,
+    },
+    /// The declared admin pubkey does not match the one expected by the
+    /// client.
+    #[error("admin pubkey mismatch: got {got}, expected {expected}")]
+    AdminPubkeyMismatch {
+        /// Redacted prefix of the pubkey hex announced in the JSON
+        /// (no-log discipline: never the full key).
+        got: String,
+        /// Redacted prefix of the pubkey hex pinned on the client.
+        expected: String,
+    },
+    /// Invalid hex for `admin_pubkey_hex` or `signature_hex`.
+    #[error("invalid hex encoding")]
+    InvalidHex,
+    /// Received pubkey is not a valid Ed25519 point.
+    #[error("admin pubkey is not a valid Ed25519 point")]
+    PubkeyNotOnCurve,
+    /// Signature does not verify against `(admin_pubkey, canonical_bytes)`.
+    #[error("signature verification failed")]
+    BadSignature,
+    /// The input exceeds the crate's pre-authentication size gate,
+    /// rejected before parsing to bound the allocation an untrusted
+    /// payload can force.
+    #[error("input exceeds the maximum allowed size")]
+    InputTooLarge,
+}
+
+impl From<envelope::DecodeError> for RosterError {
+    fn from(e: envelope::DecodeError) -> Self {
+        match e {
+            envelope::DecodeError::InvalidHex => Self::InvalidHex,
+            envelope::DecodeError::PubkeyNotOnCurve => Self::PubkeyNotOnCurve,
+        }
+    }
+}
+
 /// A verified roster: the authorized entries plus freshness metadata the
 /// caller enforces (monotonic `generation`, `expires_at`).
 #[derive(Debug, Clone)]
@@ -111,12 +159,8 @@ impl VerifiedRoster {
     #[must_use]
     pub fn authorizes(&self, relay: &WarrenRelay) -> bool {
         self.entries.iter().any(|e| {
-            e.exit_id == relay.exit_id()
-                && crate::json_io::decode_endpoint_id(&e.endpoint_id)
-                    .is_ok_and(|pk| pk == relay.endpoint_id())
-                && e.country
-                    .eq_ignore_ascii_case(relay.location().country_code())
-                && e.city.eq_ignore_ascii_case(relay.location().city())
+            let pk = crate::json_io::decode_endpoint_id(&e.endpoint_id).ok();
+            entry_authorizes(pk, e, relay)
         })
     }
 
@@ -124,12 +168,25 @@ impl VerifiedRoster {
     /// absent from the offline-signed roster (e.g. injected by a
     /// compromised backend) are dropped and counted in the returned
     /// `dropped` total so the caller can log the discrepancy.
+    ///
+    /// Decodes each entry's `endpoint_id` once up front (instead of once
+    /// per relay, as a naive `list.relays().filter(authorizes)` would),
+    /// since the SS58 decode is the expensive part of the comparison.
     #[must_use]
     pub fn authorize(&self, list: &WarrenRelayList) -> AuthorizeResult {
+        let decoded: Vec<(Option<WarrenPubkey>, &RosterEntry)> = self
+            .entries
+            .iter()
+            .map(|e| (crate::json_io::decode_endpoint_id(&e.endpoint_id).ok(), e))
+            .collect();
+
         let mut kept = Vec::new();
         let mut dropped = 0usize;
         for relay in list.relays() {
-            if self.authorizes(relay) {
+            if decoded
+                .iter()
+                .any(|(pk, e)| entry_authorizes(*pk, e, relay))
+            {
                 kept.push(relay.clone());
             } else {
                 dropped += 1;
@@ -140,6 +197,24 @@ impl VerifiedRoster {
             dropped,
         }
     }
+}
+
+/// `true` if a roster `entry` (with its `endpoint_id` already decoded to
+/// `decoded_endpoint_id`) authorizes `relay`: the stable `exit_id`, the
+/// Ed25519 endpoint id and the advertised `country`/`city` must all match.
+/// `decoded_endpoint_id` is `None` when the entry's `endpoint_id` is
+/// malformed (neither SS58 nor hex), which never authorizes anything.
+fn entry_authorizes(
+    decoded_endpoint_id: Option<WarrenPubkey>,
+    entry: &RosterEntry,
+    relay: &WarrenRelay,
+) -> bool {
+    decoded_endpoint_id.is_some_and(|pk| pk == relay.endpoint_id())
+        && entry.exit_id == relay.exit_id()
+        && entry
+            .country
+            .eq_ignore_ascii_case(relay.location().country_code())
+        && entry.city.eq_ignore_ascii_case(relay.location().city())
 }
 
 /// Outcome of [`VerifiedRoster::authorize`].
@@ -191,16 +266,17 @@ pub fn sign_roster(
 /// Verifies a roster's signature against the pinned **admin** pubkey.
 ///
 /// # Errors
-/// - [`SignedError::Json`]: invalid JSON.
-/// - [`SignedError::UnsupportedVersion`]: `version != ROSTER_VERSION`.
-/// - [`SignedError::ServerPubkeyMismatch`]: admin pubkey ≠ pinned (the
-///   variant is reused generically for "wrong signing key").
-/// - [`SignedError::InvalidHex`] / [`SignedError::PubkeyNotOnCurve`] /
-///   [`SignedError::BadSignature`]: malformed or invalid signature.
+/// - [`RosterError::InputTooLarge`]: `s` exceeds the pre-authentication
+///   size gate.
+/// - [`RosterError::Json`]: invalid JSON.
+/// - [`RosterError::UnsupportedVersion`]: `version != ROSTER_VERSION`.
+/// - [`RosterError::AdminPubkeyMismatch`]: admin pubkey ≠ pinned.
+/// - [`RosterError::InvalidHex`] / [`RosterError::PubkeyNotOnCurve`] /
+///   [`RosterError::BadSignature`]: malformed or invalid signature.
 pub fn verify_roster(
     s: &str,
     expected_admin_pubkey: Option<&str>,
-) -> Result<VerifiedRoster, SignedError> {
+) -> Result<VerifiedRoster, RosterError> {
     match expected_admin_pubkey {
         Some(p) => verify_roster_any(s, &[p]),
         None => verify_roster_any(s, &[]),
@@ -216,38 +292,23 @@ pub fn verify_roster(
 pub fn verify_roster_any(
     s: &str,
     expected_admin_pubkeys: &[&str],
-) -> Result<VerifiedRoster, SignedError> {
+) -> Result<VerifiedRoster, RosterError> {
+    if s.len() > envelope::MAX_VERIFY_INPUT_LEN {
+        return Err(RosterError::InputTooLarge);
+    }
     let signed: SignedRoster = serde_json::from_str(s)?;
     if signed.version != ROSTER_VERSION {
-        return Err(SignedError::UnsupportedVersion {
+        return Err(RosterError::UnsupportedVersion {
             got: signed.version,
         });
     }
-    if !expected_admin_pubkeys.is_empty()
-        && !expected_admin_pubkeys
-            .iter()
-            .any(|p| *p == signed.admin_pubkey_hex)
-    {
-        return Err(SignedError::ServerPubkeyMismatch {
-            got: warren_contract::redact(&signed.admin_pubkey_hex),
-            expected: expected_admin_pubkeys
-                .iter()
-                .map(|p| warren_contract::redact(p))
-                .collect::<Vec<_>>()
-                .join(","),
-        });
+    if !envelope::pin_allows(expected_admin_pubkeys, &signed.admin_pubkey_hex) {
+        let (got, expected) =
+            envelope::redact_pin_mismatch(expected_admin_pubkeys, &signed.admin_pubkey_hex);
+        return Err(RosterError::AdminPubkeyMismatch { got, expected });
     }
-    let pubkey_bytes: [u8; 32] = hex::decode(&signed.admin_pubkey_hex)
-        .map_err(|_| SignedError::InvalidHex)?
-        .try_into()
-        .map_err(|_| SignedError::InvalidHex)?;
-    let admin_pubkey =
-        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| SignedError::PubkeyNotOnCurve)?;
-    let sig_bytes: [u8; 64] = hex::decode(&signed.signature_hex)
-        .map_err(|_| SignedError::InvalidHex)?
-        .try_into()
-        .map_err(|_| SignedError::InvalidHex)?;
-    let signature = Signature::from_bytes(&sig_bytes);
+    let admin_pubkey = envelope::decode_verifying_key(&signed.admin_pubkey_hex)?;
+    let signature = envelope::decode_signature(&signed.signature_hex)?;
 
     let unsigned = UnsignedRoster {
         version: signed.version,
@@ -257,10 +318,12 @@ pub fn verify_roster_any(
         expires_at: signed.expires_at,
         admin_pubkey_hex: &signed.admin_pubkey_hex,
     };
-    let canonical = serde_json::to_vec(&unsigned).map_err(SignedError::Json)?;
+    let canonical = serde_json::to_vec(&unsigned).map_err(RosterError::Json)?;
+    // verify_strict: defense in depth, rejects small-order/non-canonical
+    // signatures the basic verification equation would still accept.
     admin_pubkey
-        .verify(&canonical, &signature)
-        .map_err(|_| SignedError::BadSignature)?;
+        .verify_strict(&canonical, &signature)
+        .map_err(|_| RosterError::BadSignature)?;
 
     Ok(VerifiedRoster {
         entries: signed.entries,
@@ -273,7 +336,6 @@ pub fn verify_roster_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::warren_types::WarrenPubkey;
     use crate::{Addr, Ingress, Listener};
     use crate::{Location, sign_relay_list};
 
@@ -323,6 +385,58 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_oversize_input() {
+        let oversize = "0".repeat(envelope::MAX_VERIFY_INPUT_LEN + 1);
+        let err = verify_roster(&oversize, None).expect_err("oversize must be rejected");
+        assert!(matches!(err, RosterError::InputTooLarge));
+    }
+
+    #[test]
+    fn verify_accepts_a_pin_differing_only_in_hex_case() {
+        // Mirrors release.rs's `eq_ignore_ascii_case` pin policy: a
+        // legitimate admin pin written in a different hex case must not be
+        // wrongly rejected.
+        let key = admin_key();
+        let signed = sign_roster(vec![entry(1, "se", "Stockholm")], &key, 1, 1_000, 9_999);
+        let json = serde_json::to_string(&signed).unwrap();
+        let upper_pin = pin(&key).to_ascii_uppercase();
+        verify_roster(&json, Some(&upper_pin))
+            .expect("a pin differing only in hex case must still be accepted");
+    }
+
+    #[test]
+    fn golden_vector_v1_signed_roster_is_frozen() {
+        // Wire vector (rule 40): freeze today's exact signed roster bytes,
+        // produced from a deterministic key. If this drifts, deployed
+        // clients stop verifying rosters produced by this build: bump
+        // ROSTER_VERSION instead of mutating the canonical shape.
+        let key = SigningKey::from_bytes(&[0x09; 32]);
+        let signed = sign_roster(vec![entry(1, "se", "Stockholm")], &key, 5, 1_000, 9_999);
+        let json = serde_json::to_string(&signed).expect("serialize");
+
+        let expected = concat!(
+            "{\"version\":1,",
+            "\"entries\":[{\"endpoint_id\":\"0101010101010101010101010101010101010101010101010101010101010101\",",
+            "\"exit_id\":\"01010101010101010101010101010101\",",
+            "\"country\":\"se\",",
+            "\"city\":\"Stockholm\"}],",
+            "\"generation\":5,",
+            "\"signed_at\":1000,",
+            "\"expires_at\":9999,",
+            "\"admin_pubkey_hex\":\"fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\",",
+            "\"signature_hex\":\"26ee4394bd0e0011d7e23dcfc1e4e05566162aa89e474a5f13869ba191aaa67af",
+            "b902ae0f217813429e03910edf106d79ec00fab6b49d6bfd9c5e3afd59ccc0a\"}",
+        );
+        assert_eq!(
+            json, expected,
+            "signed roster v1 wire bytes drifted (wire break: bump ROSTER_VERSION)"
+        );
+
+        let pin = hex::encode(key.verifying_key().as_bytes());
+        verify_roster(&json, Some(&pin)).expect("frozen vector must keep verifying");
+    }
+
+    #[test]
     fn verify_rejects_wrong_admin_pubkey() {
         // A roster self-signed by an attacker key must be refused when we
         // pin the legitimate offline admin key - the core guarantee.
@@ -337,7 +451,7 @@ mod tests {
         );
         let json = serde_json::to_string(&signed).unwrap();
         let err = verify_roster(&json, Some(&pin(&legit))).expect_err("pinned mismatch");
-        assert!(matches!(err, SignedError::ServerPubkeyMismatch { .. }));
+        assert!(matches!(err, RosterError::AdminPubkeyMismatch { .. }));
     }
 
     #[test]
@@ -376,7 +490,7 @@ mod tests {
         signed.entries.push(entry(2, "xx", "Evil"));
         let json = serde_json::to_string(&signed).unwrap();
         let err = verify_roster(&json, None).expect_err("tampered entries");
-        assert!(matches!(err, SignedError::BadSignature));
+        assert!(matches!(err, RosterError::BadSignature));
     }
 
     #[test]
@@ -532,6 +646,22 @@ mod tests {
             .expect("admin key present in set");
         assert_eq!(v.entries.len(), 1);
         let err = verify_roster_any(&json, &[other.as_str()]).expect_err("admin key absent");
-        assert!(matches!(err, SignedError::ServerPubkeyMismatch { .. }));
+        assert!(matches!(err, RosterError::AdminPubkeyMismatch { .. }));
+    }
+
+    #[test]
+    fn unsupported_version_error_names_the_roster_and_the_real_expected_version() {
+        // Regression: the roster used to borrow SignedError, which reported
+        // "unsupported signed relay list version: N (expected 8)" for a
+        // roster whose own ROSTER_VERSION is 1. The error must name the
+        // roster and the roster's own expected version.
+        let json = r#"{"version":99,"entries":[],"generation":0,"signed_at":0,"expires_at":0,"admin_pubkey_hex":"00","signature_hex":"00"}"#;
+        let err = verify_roster(json, None).expect_err("v99 must be rejected");
+        assert!(matches!(err, RosterError::UnsupportedVersion { got: 99 }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("roster") && msg.contains("expected 1"),
+            "message must name the roster and its real expected version: {msg}"
+        );
     }
 }
