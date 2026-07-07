@@ -54,6 +54,19 @@ jobs:
           git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
           echo "==> warrenguard checked out at $(git -C ../warrenguard rev-parse --short HEAD)"
+      # The [workspace.dependencies] git revs must equal .warrenguard-version:
+      # CI builds against the sibling clone at that rev via [patch], so a
+      # drifted rev would ship a declared dependency nobody tested.
+      - name: check warrenguard pin lockstep
+        run: |
+          set -euo pipefail
+          REV="$(tr -d '[:space:]' < .warrenguard-version)"
+          MISMATCH="$(grep -E 'warrenguard.*\brev = "' Cargo.toml | grep -v "rev = \"${REV}\"" || true)"
+          if [ -n "${MISMATCH}" ]; then
+            echo "Cargo.toml warrenguard rev diverges from .warrenguard-version (${REV}):"
+            echo "${MISMATCH}"
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
@@ -61,3 +74,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The workspace denies rustdoc::broken_intra_doc_links; only a doc build
+      # exercises that lint, so run one with warnings promoted.
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
