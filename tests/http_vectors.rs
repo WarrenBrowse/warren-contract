@@ -151,8 +151,9 @@ fn exit_update_status_shape() {
 }
 
 #[test]
-fn legacy_register_exit_request_without_update_status_still_parses() {
-    // Wire-compat: exits that pre-date the update agent omit the field.
+fn legacy_register_exit_request_without_update_status_or_telemetry_still_parses() {
+    // Wire-compat: exits that pre-date the update agent and the telemetry
+    // block omit both fields.
     let legacy = serde_json::json!({
         "endpoints": [],
         "country": "SG",
@@ -164,18 +165,6 @@ fn legacy_register_exit_request_without_update_status_still_parses() {
         req.update_status.is_none(),
         "absent update_status must parse as None"
     );
-}
-
-#[test]
-fn legacy_register_exit_request_without_telemetry_still_parses() {
-    // Wire-compat: exits that pre-date the telemetry block omit the field.
-    let legacy = serde_json::json!({
-        "endpoints": [],
-        "country": "SG",
-        "city": "Singapore",
-        "weight": 100,
-    });
-    let req: RegisterExitRequest = serde_json::from_value(legacy).unwrap();
     assert!(
         req.telemetry.is_none(),
         "absent telemetry must parse as None"
@@ -246,4 +235,315 @@ fn register_exit_request_telemetry_roundtrips() {
     assert_eq!(telemetry.bytes_tx_total, 1);
     assert_eq!(telemetry.clients_connected, 1);
     assert!(telemetry.rtt_p50_ms.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Doc-54 fleet-rollout admin DTOs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn admin_release_row_and_response_shape() {
+    let hash = "9f".repeat(32);
+    let row = AdminReleaseRow {
+        version: "v0.7.0-3-gabc1234".to_owned(),
+        channel: "stable".to_owned(),
+        binary_sha256_hex: hash.clone(),
+        binary_size: 42_000_000,
+        generation: 7,
+        expires_at: 1_700_086_400,
+        created_at: 1_700_000_000,
+        binary_uploaded: true,
+    };
+    assert_eq!(
+        json(&row),
+        serde_json::json!({
+            "version": "v0.7.0-3-gabc1234",
+            "channel": "stable",
+            "binary_sha256_hex": hash,
+            "binary_size": 42_000_000u64,
+            "generation": 7u64,
+            "expires_at": 1_700_086_400u64,
+            "created_at": 1_700_000_000u64,
+            "binary_uploaded": true,
+        })
+    );
+    roundtrips(&row);
+
+    let resp = AdminReleasesResponse {
+        releases: vec![row],
+    };
+    assert_eq!(json(&resp)["releases"].as_array().unwrap().len(), 1);
+    roundtrips(&resp);
+}
+
+#[test]
+fn admin_create_release_request_embeds_the_signed_manifest() {
+    let manifest = warren_contract::release::sign_release_manifest(
+        "v0.7.0-3-gabc1234",
+        "canary",
+        &"9f".repeat(32),
+        42_000_000,
+        7,
+        1_700_000_000,
+        1_700_086_400,
+        &ed25519_dalek::SigningKey::from_bytes(&[0xab; 32]),
+    );
+    let req = AdminCreateReleaseRequest {
+        manifest: manifest.clone(),
+    };
+    let v = json(&req);
+    assert_eq!(v["manifest"]["release_version"], "v0.7.0-3-gabc1234");
+    assert_eq!(v["manifest"]["generation"], 7);
+    assert_eq!(
+        v.as_object().unwrap().len(),
+        1,
+        "manifest is the sole top-level field: {v}"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_create_rollout_request_omits_absent_canary() {
+    let req = AdminCreateRolloutRequest {
+        version: "v0.7.0-3-gabc1234".to_owned(),
+        canary_pubkey_ss58: None,
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "version": "v0.7.0-3-gabc1234" }),
+        "canary_pubkey_ss58 must be omitted when None"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_create_rollout_request_carries_canary_when_present() {
+    let addr = ss58::encode(&[0x33; 32]);
+    let req = AdminCreateRolloutRequest {
+        version: "v0.7.0-3-gabc1234".to_owned(),
+        canary_pubkey_ss58: Some(PubkeySs58::try_from(addr.clone()).unwrap()),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "version": "v0.7.0-3-gabc1234", "canary_pubkey_ss58": addr })
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_rollout_response_shape() {
+    let addr = ss58::encode(&[0x44; 32]);
+    let node = AdminRolloutNodeRow {
+        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+        is_canary: true,
+        state: "verifying".to_owned(),
+        previous_version: Some("v0.6.9".to_owned()),
+        error: None,
+        updated_at: 1_700_000_100,
+    };
+    assert_eq!(
+        json(&node),
+        serde_json::json!({
+            "pubkey_ss58": addr,
+            "is_canary": true,
+            "state": "verifying",
+            "previous_version": "v0.6.9",
+            "updated_at": 1_700_000_100u64,
+        }),
+        "error must be omitted when None"
+    );
+    roundtrips(&node);
+
+    let resp = AdminRolloutResponse {
+        id: 12,
+        version: "v0.7.0-3-gabc1234".to_owned(),
+        status: "active".to_owned(),
+        created_at: 1_700_000_000,
+        nodes: vec![node],
+    };
+    let v = json(&resp);
+    assert_eq!(v["id"], 12);
+    assert_eq!(v["status"], "active");
+    assert_eq!(v["nodes"].as_array().unwrap().len(), 1);
+    roundtrips(&resp);
+}
+
+#[test]
+fn admin_rollout_audit_response_shape() {
+    let row = AdminRolloutAuditRow {
+        at: 1_700_000_000,
+        actor: "controller".to_owned(),
+        action: "swap_applied".to_owned(),
+        detail_json: r#"{"node":"wbAAA"}"#.to_owned(),
+    };
+    assert_eq!(
+        json(&row),
+        serde_json::json!({
+            "at": 1_700_000_000u64,
+            "actor": "controller",
+            "action": "swap_applied",
+            "detail_json": r#"{"node":"wbAAA"}"#,
+        })
+    );
+    roundtrips(&row);
+
+    let resp = AdminRolloutAuditResponse { rows: vec![row] };
+    assert_eq!(json(&resp)["rows"].as_array().unwrap().len(), 1);
+    roundtrips(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Campaign voucher DTOs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn admin_create_voucher_request_omits_false_unlimited_and_absent_optionals() {
+    let req = AdminCreateVoucherRequest {
+        duration_secs: 2_592_000,
+        payment_method: PaymentMethod::Manual,
+        max_redemptions: None,
+        unlimited_redemptions: false,
+        valid_until_unix_secs: None,
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "duration_secs": 2_592_000u64, "payment_method": "manual" }),
+        "false unlimited_redemptions and absent max_redemptions/valid_until must be omitted"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_create_voucher_request_carries_true_unlimited_and_deadline() {
+    let req = AdminCreateVoucherRequest {
+        duration_secs: 2_592_000,
+        payment_method: PaymentMethod::Manual,
+        max_redemptions: None,
+        unlimited_redemptions: true,
+        valid_until_unix_secs: Some(1_700_086_400),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "duration_secs": 2_592_000u64,
+            "payment_method": "manual",
+            "unlimited_redemptions": true,
+            "valid_until_unix_secs": 1_700_086_400u64,
+        }),
+        "true unlimited_redemptions must be present on the wire"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_create_voucher_response_defaults_max_redemptions_to_single_use() {
+    // A server response that pre-dates campaign vouchers omits the field.
+    let raw = r#"{"voucher_secret":"ABCD-EFGH-JKMN-PQRS","secret_hash_hex":"deadbeef","duration_secs":3600}"#;
+    let parsed: AdminCreateVoucherResponse = serde_json::from_str(raw).unwrap();
+    assert_eq!(
+        parsed.max_redemptions,
+        Some(1),
+        "absent max_redemptions must default to single-use"
+    );
+    assert!(parsed.valid_until_unix_secs.is_none());
+}
+
+#[test]
+fn admin_create_voucher_response_full_shape() {
+    let resp = AdminCreateVoucherResponse {
+        voucher_secret: "ABCD-EFGH-JKMN-PQRS".to_owned(),
+        secret_hash_hex: "deadbeef".to_owned(),
+        duration_secs: 3600,
+        max_redemptions: None,
+        valid_until_unix_secs: Some(1_700_086_400),
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "voucher_secret": "ABCD-EFGH-JKMN-PQRS",
+            "secret_hash_hex": "deadbeef",
+            "duration_secs": 3600u64,
+            "max_redemptions": null,
+            "valid_until_unix_secs": 1_700_086_400u64,
+        })
+    );
+    roundtrips(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// Unknown-field tolerance: the tolerant-reader posture is part of the wire
+// contract. If someone adds `deny_unknown_fields` to one of these DTOs,
+// these tests must break.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn register_account_request_tolerates_unknown_field() {
+    let addr = ss58::encode(&[0x55; 32]);
+    let raw = serde_json::json!({
+        "pubkey_ss58": addr,
+        "voucher_secret": "ABCD-EFGH-JKMN-PQRS",
+        "unexpected_future_field": "surprise",
+    });
+    let parsed: RegisterAccountRequest = serde_json::from_value(raw)
+        .expect("an unknown field must not break deserialization (tolerant reader)");
+    assert_eq!(parsed.voucher_secret, "ABCD-EFGH-JKMN-PQRS");
+}
+
+#[test]
+fn subscription_response_tolerates_unknown_field() {
+    let raw = serde_json::json!({
+        "expires_at": 1_700_000_000u64,
+        "unexpected_future_field": "surprise",
+    });
+    let parsed: SubscriptionResponse = serde_json::from_value(raw)
+        .expect("an unknown field must not break deserialization (tolerant reader)");
+    assert_eq!(parsed.expires_at, 1_700_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Session-cap open/close.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_open_request_omits_absent_max_devices() {
+    let addr = ss58::encode(&[0x66; 32]);
+    let device_id_hex = "a".repeat(32);
+    let req = SessionOpenRequest {
+        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+        device_id_hex: device_id_hex.clone(),
+        exit_id: "exit-fr-1".to_owned(),
+        max_devices: None,
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "pubkey_ss58": addr,
+            "device_id_hex": device_id_hex,
+            "exit_id": "exit-fr-1",
+        }),
+        "max_devices must be omitted when None"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn session_open_request_carries_max_devices_when_present() {
+    let addr = ss58::encode(&[0x77; 32]);
+    let device_id_hex = "b".repeat(32);
+    let req = SessionOpenRequest {
+        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+        device_id_hex: device_id_hex.clone(),
+        exit_id: "exit-fr-1".to_owned(),
+        max_devices: Some(3),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "pubkey_ss58": addr,
+            "device_id_hex": device_id_hex,
+            "exit_id": "exit-fr-1",
+            "max_devices": 3u32,
+        })
+    );
+    roundtrips(&req);
 }
