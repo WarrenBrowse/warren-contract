@@ -9,6 +9,14 @@
 //! `axum` + SQL transitive on every client) and the client (which would
 //! otherwise pay the cost of compiling the server) can depend on it
 //! cheaply.
+//!
+//! # House rule: encoding an absent optional field
+//!
+//! New optional fields use `#[serde(default, skip_serializing_if =
+//! "Option::is_none")]` (absent on the wire when `None`). A minority of
+//! older fields serialize `null` or use empty-string-as-absent; those
+//! encodings are frozen wire behavior for their DTOs, do not copy them
+//! into new fields.
 
 use std::fmt;
 use std::str::FromStr;
@@ -28,12 +36,77 @@ const PUBKEY_HEX_LEN: usize = 64;
 const TOKEN_ID_HEX_LEN: usize = 12;
 const COUNTRY_CODE_LEN: usize = 2;
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+// The validating `TryFrom<&str>` stays hand-written per newtype (it is
+// the type's whole contract); everything downstream of it is identical
+// plumbing, generated here so the four newtypes cannot drift apart.
+macro_rules! validated_string_impls {
+    ($ty:ident) => {
+        impl $ty {
+            /// Borrowed view of the raw validated string.
+            #[must_use]
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = ValidationError;
+            fn try_from(s: String) -> Result<Self, Self::Error> {
+                Self::try_from(s.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = ValidationError;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Self::try_from(s)
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(v: $ty) -> Self {
+                v.0
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::ops::Deref for $ty {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
 /// Errors raised by the validation newtypes when they receive a
 /// malformed string. The payload carries only a redacted prefix of the
 /// input (see [`crate::redact`]): a rejected value can be identity
 /// material or a mispasted secret, so it is never echoed in full
 /// (no-log discipline).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ValidationError {
     /// Pubkey string is not 64 lowercase hex chars.
     #[error("invalid pubkey hex: {0}")]
@@ -48,6 +121,14 @@ pub enum ValidationError {
     /// Country code is not 2 ASCII letters.
     #[error("invalid country code: {0}")]
     InvalidCountryCode(String),
+    /// Payment-method string is not one of the known wire tokens.
+    #[error("unknown payment method: {0}")]
+    InvalidPaymentMethod(String),
+    /// A CRL revocation reason contains a line break, which would make
+    /// the signed canonical message ambiguous (see
+    /// [`crl_canonical_message`]).
+    #[error("CRL reason contains a line break: {0}")]
+    InvalidCrlReason(String),
 }
 
 /// Currency of the received payment. Used by the pricing policy to map
@@ -55,12 +136,17 @@ pub enum ValidationError {
 /// (`"EUR"`, `"SAT"`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-#[allow(missing_docs, clippy::upper_case_acronyms)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Currency {
+    /// Euro (ISO 4217), smallest unit: cent.
     EUR,
+    /// US dollar (ISO 4217), smallest unit: cent.
     USD,
+    /// Bitcoin, denominated in whole BTC.
     BTC,
+    /// Monero, denominated in whole XMR.
     XMR,
+    /// Bitcoin satoshi (the on-wire unit for Lightning amounts).
     SAT,
 }
 
@@ -91,18 +177,21 @@ impl fmt::Display for Currency {
 pub struct TokenId(String);
 
 impl TokenId {
-    /// Borrowed view of the raw hex string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// Build directly from already-trusted bytes. Used by the
     /// enrollment crate which produces the bytes itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hex` is not 12 lowercase hex chars: the caller
+    /// promised trusted input, so a malformed value is a broken
+    /// invariant, not a recoverable error.
     #[doc(hidden)]
     #[must_use]
     pub fn from_hex_validated(hex: String) -> Self {
-        debug_assert_eq!(hex.len(), TOKEN_ID_HEX_LEN);
+        assert!(
+            is_lower_hex(&hex, TOKEN_ID_HEX_LEN),
+            "TokenId::from_hex_validated requires 12 lowercase hex chars"
+        );
         Self(hex)
     }
 }
@@ -110,47 +199,14 @@ impl TokenId {
 impl TryFrom<&str> for TokenId {
     type Error = ValidationError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        if s.len() != TOKEN_ID_HEX_LEN || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::InvalidTokenId(crate::redact(s)));
-        }
-        if s.chars().any(|c| c.is_ascii_uppercase()) {
+        if !is_lower_hex(s, TOKEN_ID_HEX_LEN) {
             return Err(ValidationError::InvalidTokenId(crate::redact(s)));
         }
         Ok(Self(s.to_owned()))
     }
 }
 
-impl TryFrom<String> for TokenId {
-    type Error = ValidationError;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::try_from(s.as_str())
-    }
-}
-
-impl FromStr for TokenId {
-    type Err = ValidationError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::try_from(s)
-    }
-}
-
-impl From<TokenId> for String {
-    fn from(v: TokenId) -> Self {
-        v.0
-    }
-}
-
-impl AsRef<str> for TokenId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for TokenId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+validated_string_impls!(TokenId);
 
 /// Ed25519 public key, hex-encoded. 64 lowercase hex chars. The
 /// canonical Warren identity surface for users, exits, and admins.
@@ -158,69 +214,21 @@ impl fmt::Display for TokenId {
 #[serde(try_from = "String", into = "String")]
 pub struct PubkeyHex(String);
 
-impl PubkeyHex {
-    /// Borrowed view of the raw hex string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 impl TryFrom<&str> for PubkeyHex {
     type Error = ValidationError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        if s.len() != PUBKEY_HEX_LEN || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::InvalidPubkey(crate::redact(s)));
-        }
-        if s.chars().any(|c| c.is_ascii_uppercase()) {
+        if !is_lower_hex(s, PUBKEY_HEX_LEN) {
             return Err(ValidationError::InvalidPubkey(crate::redact(s)));
         }
         Ok(Self(s.to_owned()))
     }
 }
 
-impl TryFrom<String> for PubkeyHex {
-    type Error = ValidationError;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::try_from(s.as_str())
-    }
-}
-
-impl FromStr for PubkeyHex {
-    type Err = ValidationError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::try_from(s)
-    }
-}
-
-impl From<PubkeyHex> for String {
-    fn from(v: PubkeyHex) -> Self {
-        v.0
-    }
-}
+validated_string_impls!(PubkeyHex);
 
 impl AsRef<[u8]> for PubkeyHex {
     fn as_ref(&self) -> &[u8] {
         self.0.as_bytes()
-    }
-}
-
-impl std::ops::Deref for PubkeyHex {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for PubkeyHex {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for PubkeyHex {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 
@@ -241,12 +249,6 @@ impl fmt::Display for PubkeyHex {
 pub struct PubkeySs58(String);
 
 impl PubkeySs58 {
-    /// Borrowed view of the raw SS58 string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
     /// Decode the address back to the 32 raw Ed25519 bytes at the crypto
     /// boundary. Infallible because the value was validated on
     /// construction; a failure here would mean the invariant was broken.
@@ -274,58 +276,13 @@ impl TryFrom<&str> for PubkeySs58 {
     }
 }
 
-impl TryFrom<String> for PubkeySs58 {
-    type Error = ValidationError;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::try_from(s.as_str())
-    }
-}
-
-impl FromStr for PubkeySs58 {
-    type Err = ValidationError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::try_from(s)
-    }
-}
-
-impl From<PubkeySs58> for String {
-    fn from(v: PubkeySs58) -> Self {
-        v.0
-    }
-}
-
-impl std::ops::Deref for PubkeySs58 {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for PubkeySs58 {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for PubkeySs58 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+validated_string_impls!(PubkeySs58);
 
 /// ISO 3166-1 alpha-2 country code (2 ASCII letters, uppercased on
 /// construction so the lookup is canonical).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CountryCode(String);
-
-impl CountryCode {
-    /// Borrowed view of the raw 2-letter string (always uppercase).
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl TryFrom<&str> for CountryCode {
     type Error = ValidationError;
@@ -337,42 +294,10 @@ impl TryFrom<&str> for CountryCode {
     }
 }
 
-impl TryFrom<String> for CountryCode {
-    type Error = ValidationError;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::try_from(s.as_str())
-    }
-}
-
-impl FromStr for CountryCode {
-    type Err = ValidationError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::try_from(s)
-    }
-}
-
-impl From<CountryCode> for String {
-    fn from(v: CountryCode) -> Self {
-        v.0
-    }
-}
-
-impl AsRef<str> for CountryCode {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for CountryCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+validated_string_impls!(CountryCode);
 
 // ---------------------------------------------------------------------------
-// Payment method (wire-compatible with both the server domain enum
-// `warren_api::vouchers::PaymentMethod` and the client enum that used
-// to live in `warren_api_client`).
+// Payment method.
 // ---------------------------------------------------------------------------
 
 /// Payment method tag echoed by the admin voucher endpoints.
@@ -406,9 +331,10 @@ impl PaymentMethod {
     ///
     /// # Errors
     ///
-    /// Returns `Err` carrying the unrecognized input so the caller can
-    /// surface a stable error message at the API boundary.
-    pub fn from_wire(s: &str) -> Result<Self, String> {
+    /// Returns [`ValidationError::InvalidPaymentMethod`] carrying only a
+    /// redacted prefix of the input: the value is untrusted and could be
+    /// a mispasted secret (no-log discipline).
+    pub fn from_wire(s: &str) -> Result<Self, ValidationError> {
         match s {
             "lightning" => Ok(Self::Lightning),
             "monero" => Ok(Self::Monero),
@@ -418,7 +344,7 @@ impl PaymentMethod {
             "manual" => Ok(Self::Manual),
             "appstore" => Ok(Self::AppStore),
             "googleplay" => Ok(Self::GooglePlay),
-            other => Err(format!("unknown payment method: {other:?}")),
+            other => Err(ValidationError::InvalidPaymentMethod(crate::redact(other))),
         }
     }
 
@@ -711,9 +637,28 @@ pub struct CrlEntry {
     /// Unix-secs of the admin revocation action.
     pub revoked_at_unix_secs: u64,
     /// Short tag describing why the revocation was issued (e.g.
-    /// `"chargeback"`, `"abuse"`, `"compromised"`). Free-form;
-    /// surfaced in admin tooling, not enforced.
+    /// `"chargeback"`, `"abuse"`, `"compromised"`). Free-form except
+    /// line breaks, which are rejected at deserialization because they
+    /// would make [`crl_canonical_message`] ambiguous.
+    #[serde(deserialize_with = "deserialize_single_line_reason")]
     pub reason: String,
+}
+
+/// Reject line breaks in a CRL `reason` at the serde boundary: the
+/// canonical message delimits entries with `\n`, so a reason embedding
+/// one would let two different revocation lists collide on the same
+/// signed preimage.
+fn deserialize_single_line_reason<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if s.contains(['\n', '\r']) {
+        return Err(serde::de::Error::custom(ValidationError::InvalidCrlReason(
+            crate::redact(&s),
+        )));
+    }
+    Ok(s)
 }
 
 /// Build the canonical byte string the admin signs to authenticate a
@@ -726,12 +671,21 @@ pub struct CrlEntry {
 /// The leading `"v1\n"` is a version tag. Bumping the canonical
 /// format requires a new tag (`"v2\n"`) and a coordinated rollout;
 /// never mutate v1.
+///
+/// Injectivity relies on `reason` being line-break-free, which the
+/// serde boundary enforces (see [`CrlEntry::reason`] and
+/// [`AdminCrlRevokeRequest::reason`]); `:` inside a reason is harmless
+/// because the two fixed-shape fields before it disambiguate the line.
 #[must_use]
 pub fn crl_canonical_message(
     version: u64,
     generated_at_unix_secs: u64,
     revocations: &[CrlEntry],
 ) -> Vec<u8> {
+    debug_assert!(
+        revocations.iter().all(|e| !e.reason.contains(['\n', '\r'])),
+        "CRL reason with a line break breaks preimage injectivity"
+    );
     let mut sorted: Vec<&CrlEntry> = revocations.iter().collect();
     sorted.sort_by(|a, b| a.pubkey_ss58.cmp(&b.pubkey_ss58));
     let mut out = String::with_capacity(64 + revocations.len() * 100);
@@ -759,7 +713,9 @@ pub fn crl_canonical_message(
 pub struct AdminCrlRevokeRequest {
     /// Subscriber to revoke, as a Warren SS58 address (`wb…`).
     pub pubkey_ss58: PubkeySs58,
-    /// Short tag (e.g. `"abuse"`, `"chargeback"`).
+    /// Short tag (e.g. `"abuse"`, `"chargeback"`). Line breaks are
+    /// rejected at deserialization (see [`CrlEntry::reason`]).
+    #[serde(deserialize_with = "deserialize_single_line_reason")]
     pub reason: String,
 }
 
@@ -808,9 +764,9 @@ pub struct RegisterEndpoint {
 /// `POST /v1/exits/register` body (consumed by warren-exit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterExitRequest {
-    /// Addresses the exit uses (1..N). Replaces the v5 `ip_addrs` +
-    /// `ipv6_egress`: family is explicit, egress is per-endpoint, and
-    /// ports/transports live in each endpoint's `listeners`.
+    /// Addresses the exit uses (1..N). Family is explicit, egress is
+    /// per-endpoint, and ports/transports live in each endpoint's
+    /// `listeners`.
     pub endpoints: Vec<RegisterEndpoint>,
     /// ISO 3166-1 alpha-2 country code.
     pub country: CountryCode,
@@ -906,18 +862,18 @@ pub struct ExitTelemetry {
     /// aggregated node-wide (never per client).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt_p50_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// 95th percentile RTT (same aggregation as `rtt_p50_ms`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtt_p95_ms: Option<u32>,
     /// Packets QUIC declared lost, summed over live connections.
     pub quic_lost_packets_total: u64,
     /// Congestion events, summed over live connections.
     pub quic_congestion_events_total: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Whole-box CPU utilisation percentage over the last sample tick.
-    pub cpu_percent: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f32>,
     /// Resident set size of the exit process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_rss_bytes: Option<u64>,
     /// 1-minute load average, scaled by 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -925,8 +881,8 @@ pub struct ExitTelemetry {
     /// Public-NIC counters (whole interface, not just the tunnel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nic_tx_bytes_total: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Public-NIC receive counter (whole interface).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nic_rx_bytes_total: Option<u64>,
     /// Public-NIC capacity in Mbit/s when the node knows it; otherwise the
     /// fleet spec supplies it server-side.
@@ -1112,9 +1068,12 @@ pub struct ExitUpdateStatus {
 
 /// Update-agent states (doc 54 §4). Wire values are lowercase
 /// snake_case; new states may be appended, so consumers must treat the
-/// enum as open-ended.
+/// enum as open-ended: an unrecognized wire token deserializes to
+/// [`ExitUpdateState::Unknown`] instead of failing the whole heartbeat
+/// (a newer exit must never break an older server's parse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ExitUpdateState {
     /// No update in flight; running == last authorized release.
     Idle,
@@ -1131,6 +1090,10 @@ pub enum ExitUpdateState {
     /// Applied in RAM but the A/B slot persist is pending (e.g. GRUB
     /// nodes where the automated slot bake is not yet safe).
     PersistPending,
+    /// Catch-all for a state minted by a newer peer. Receive-side only:
+    /// nothing ever serializes it deliberately.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Maintenance-drain directive handed to an exit on its heartbeat
@@ -1144,15 +1107,20 @@ pub struct DrainDirective {
     pub reason_code: u8,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// `POST /v1/exits/enroll` request body (consumed by warren-exit).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnrollExitRequest {
     /// Single-use enrollment token (`wkey-exit-<id>-<secret>`).
     pub token: String,
+}
+
+impl fmt::Debug for EnrollExitRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrollExitRequest")
+            // Redacted: the single-use secret must never appear in logs.
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// `POST /v1/exits/enroll` response body. The scope is authoritative;
@@ -1215,7 +1183,9 @@ pub struct AdminExitGeoIp {
     pub source: String,
 }
 
-/// Admin view of one dial listener on an exit endpoint.
+/// Admin view of one dial listener on an exit endpoint. Field-identical
+/// to [`RegisterListener`] today but kept distinct so the admin view
+/// can grow fields the exit-facing type never carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminExitListener {
     /// Listening port.
@@ -1368,6 +1338,9 @@ pub struct AdminRolloutNodeRow {
     pub is_canary: bool,
     /// State-machine token (`waiting`, `pending`, `draining`,
     /// `swapping`, `verifying`, `done`, `failed`, `rolled_back`).
+    /// Deliberately a `String`, not an enum: the vocabulary is owned by
+    /// the server-side controller and only displayed by the admin
+    /// panel, so a new state must not break an older panel's parse.
     pub state: String,
     /// Version the node ran before the rollout (rollback target).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1387,7 +1360,9 @@ pub struct AdminRolloutResponse {
     /// Target release version.
     pub version: String,
     /// Whole-rollout status token (`active`, `completed`,
-    /// `rolled_back`, `aborted`).
+    /// `rolled_back`, `aborted`). A `String` for the same reason as
+    /// [`AdminRolloutNodeRow::state`]: server-owned, display-only
+    /// vocabulary.
     pub status: String,
     /// Unix epoch seconds the rollout was created.
     pub created_at: u64,
@@ -1596,7 +1571,7 @@ pub struct AdminCreateVoucherRequest {
 
 /// Response from `POST /v1/admin/vouchers`. The secret is shown
 /// **once** - never re-derivable from the hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdminCreateVoucherResponse {
     /// Plain-text Crockford-32 voucher in dashed display form
     /// `XXXX-XXXX-XXXX-XXXX` (19 chars). Shown to the human **once**.
@@ -1612,6 +1587,19 @@ pub struct AdminCreateVoucherResponse {
     /// Echo of the redemption deadline, when one was set.
     #[serde(default)]
     pub valid_until_unix_secs: Option<u64>,
+}
+
+impl fmt::Debug for AdminCreateVoucherResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdminCreateVoucherResponse")
+            // Redacted: the show-once secret must never appear in logs.
+            .field("voucher_secret", &"<redacted>")
+            .field("secret_hash_hex", &self.secret_hash_hex)
+            .field("duration_secs", &self.duration_secs)
+            .field("max_redemptions", &self.max_redemptions)
+            .field("valid_until_unix_secs", &self.valid_until_unix_secs)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1903,7 +1891,7 @@ pub struct AdminCreateEnrollmentTokenBody {
 
 /// `POST /v1/admin/enrollment-tokens` response body. The clear token
 /// is returned **once** here and never again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdminCreateEnrollmentTokenResponse {
     /// Clear token string `wkey-exit-<id>-<secret>`. Display once.
     pub token: String,
@@ -1917,6 +1905,21 @@ pub struct AdminCreateEnrollmentTokenResponse {
     pub scope_city: String,
     /// Scope echo.
     pub scope_weight: u64,
+}
+
+impl fmt::Debug for AdminCreateEnrollmentTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdminCreateEnrollmentTokenResponse")
+            // Redacted: the show-once clear token must never appear in
+            // logs; `id` is the log-safe reference.
+            .field("token", &"<redacted>")
+            .field("id", &self.id)
+            .field("expires_at", &self.expires_at)
+            .field("scope_country", &self.scope_country)
+            .field("scope_city", &self.scope_city)
+            .field("scope_weight", &self.scope_weight)
+            .finish()
+    }
 }
 
 /// One row of the admin enrollment-token listing.
@@ -2006,7 +2009,7 @@ pub struct AdminReferralsResponse {
 /// transaction id, no PSP customer reference. Day-truncation is applied
 /// at write time (pattern R2/R6) so the timestamp cannot be used for
 /// cross-table timing correlation. This matches the invariants of
-/// [`crate::payment_ledger::LedgerEntry`] on the server side.
+/// `warren_api::payment_ledger::LedgerEntry` on the server side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminLedgerRow {
     /// Payment provider (e.g. `"stripe"`, `"btcpay"`, `"monero"`).
@@ -2029,9 +2032,9 @@ pub struct AdminLedgerResponse {
     pub total: u64,
 }
 
-// ============================================================================
-// B4: Stripe card-refund action (POST /v1/admin/subscribers/{pubkey}/stripe-refund)
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Admin: Stripe card refund (POST /v1/admin/subscribers/{pubkey}/stripe-refund).
+// ---------------------------------------------------------------------------
 
 /// Response for `POST /v1/admin/subscribers/{pubkey_ss58}/stripe-refund`.
 ///
@@ -2053,9 +2056,9 @@ pub struct AdminStripeRefundResponse {
     pub subscription_expired: bool,
 }
 
-// ============================================================================
-// EU CRD art. 11a withdrawal queue (POST /v1/withdrawal + admin processing)
-// ============================================================================
+// ---------------------------------------------------------------------------
+// EU CRD art. 11a withdrawal queue (POST /v1/withdrawal + admin processing).
+// ---------------------------------------------------------------------------
 
 /// Request body for `POST /v1/withdrawal` (no-auth, website-facing).
 ///
@@ -2121,10 +2124,10 @@ pub struct AdminWithdrawalProcessResponse {
     pub stripe_refund_id: Option<String>,
 }
 
-// ============================================================================
+// ---------------------------------------------------------------------------
 // Multi-exit failover incidents (POST /v1/incidents/exit-down +
-// GET /v1/admin/exits/health)
-// ============================================================================
+// GET /v1/admin/exits/health).
+// ---------------------------------------------------------------------------
 
 /// Allowed `reason_code` values on the failover-incident wire. Kept
 /// as a discriminated enum (vs a free-form string) so an attacker
@@ -2175,6 +2178,12 @@ pub struct IncidentExitDownRequest {
 /// Operators reading the log only get the operator-side metadata
 /// (`exit_id_hex`, the two pubkey hexes, location forensics) - all of
 /// which is already public via the signed relay list.
+///
+/// Fields are deliberately plain `String`s (not the validating
+/// newtypes): this is fire-and-forget forensic telemetry, and a report
+/// whose observed value is malformed (e.g. garbage served by a MITM)
+/// is exactly the report worth receiving. The server must sanitize
+/// before logging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncidentPubkeyMismatchRequest {
     /// 32-char hex stable exit identifier whose pin entry was flagged.
@@ -2323,9 +2332,7 @@ const DEVICE_ID_HEX_LEN: usize = 32;
 /// handler boundary with a 400 on failure.
 #[must_use]
 pub fn is_valid_device_id_hex(s: &str) -> bool {
-    s.len() == DEVICE_ID_HEX_LEN
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    is_lower_hex(s, DEVICE_ID_HEX_LEN)
 }
 
 /// `POST /v1/session/open` request body (sent by an exit on behalf of a
@@ -2339,12 +2346,13 @@ pub struct SessionOpenRequest {
     /// Validated at the handler boundary (400 on malformed).
     pub device_id_hex: String,
     /// Exit currently serving this device (diagnostics; stored on the
-    /// lease).
+    /// lease). An operator label like `exit-fr-1`, NOT the 16-byte
+    /// [`ExitId`] used by [`RegisterExitRequest`].
     pub exit_id: String,
     /// Optional cap override the exit may pass from its CLI. When
     /// absent, the server uses `warren_config::MAX_DEVICES_PER_ACCOUNT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_devices: Option<usize>,
+    pub max_devices: Option<u32>,
 }
 
 /// `POST /v1/session/open` response body. Always returned with HTTP 200;
@@ -2354,10 +2362,10 @@ pub struct SessionOpenResponse {
     /// `true` if the device was admitted (fresh lease or renewal).
     pub admitted: bool,
     /// Cap in force (echoed for logging / client display).
-    pub max: usize,
+    pub max: u32,
     /// Distinct live devices currently leased for this account. Equals
     /// `max` when `admitted` is `false`.
-    pub current: usize,
+    pub current: u32,
 }
 
 /// `POST /v1/session/close` request body (graceful disconnect reported
@@ -3070,6 +3078,273 @@ mod tests {
         assert!(
             parsed.version.is_none(),
             "row emitted by a pre-version server must decode with version=None"
+        );
+    }
+
+    #[test]
+    fn currency_round_trips_all_uppercase_tokens() {
+        for (variant, expected) in [
+            (Currency::EUR, "\"EUR\""),
+            (Currency::USD, "\"USD\""),
+            (Currency::BTC, "\"BTC\""),
+            (Currency::XMR, "\"XMR\""),
+            (Currency::SAT, "\"SAT\""),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, expected, "variant {variant:?} wire form");
+            let parsed: Currency = serde_json::from_str(expected).expect("deserialize");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn currency_rejects_lowercase_token() {
+        assert!(
+            serde_json::from_str::<Currency>("\"eur\"").is_err(),
+            "lowercase must be rejected (rename_all = UPPERCASE contract)"
+        );
+    }
+
+    #[test]
+    fn notice_level_round_trips_lowercase_tokens() {
+        for (variant, expected) in [
+            (NoticeLevel::Info, "\"info\""),
+            (NoticeLevel::Warning, "\"warning\""),
+            (NoticeLevel::Error, "\"error\""),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, expected, "variant {variant:?} wire form");
+            let parsed: NoticeLevel = serde_json::from_str(expected).expect("deserialize");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn notice_level_rejects_uppercase_token() {
+        assert!(
+            serde_json::from_str::<NoticeLevel>("\"INFO\"").is_err(),
+            "uppercase must be rejected (rename_all = lowercase contract)"
+        );
+    }
+
+    #[test]
+    fn exit_update_state_round_trips_all_known_tokens() {
+        for (variant, expected) in [
+            (ExitUpdateState::Idle, "\"idle\""),
+            (ExitUpdateState::Staging, "\"staging\""),
+            (ExitUpdateState::Staged, "\"staged\""),
+            (ExitUpdateState::Swapping, "\"swapping\""),
+            (ExitUpdateState::Applied, "\"applied\""),
+            (ExitUpdateState::Failed, "\"failed\""),
+            (ExitUpdateState::PersistPending, "\"persist_pending\""),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, expected, "variant {variant:?} wire form");
+            let parsed: ExitUpdateState = serde_json::from_str(expected).expect("deserialize");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn exit_update_state_unrecognized_token_deserializes_to_unknown() {
+        let parsed: ExitUpdateState = serde_json::from_str("\"resharding\"").expect(
+            "an unrecognized token must fall back to Unknown, never fail the whole heartbeat",
+        );
+        assert_eq!(parsed, ExitUpdateState::Unknown);
+    }
+
+    #[test]
+    fn exit_update_state_unknown_serializes_as_unknown_token() {
+        let json = serde_json::to_string(&ExitUpdateState::Unknown).expect("serialize");
+        assert_eq!(json, "\"unknown\"");
+    }
+
+    #[test]
+    fn crl_entry_rejects_reason_with_line_break() {
+        let pubkey = crate::ss58::encode(&[0x11; 32]);
+        let raw = format!(
+            r#"{{"pubkey_ss58":"{pubkey}","revoked_at_unix_secs":1700000000,"reason":"line one\nline two"}}"#
+        );
+        assert!(
+            serde_json::from_str::<CrlEntry>(&raw).is_err(),
+            "a reason containing a line break must be rejected at deserialization"
+        );
+    }
+
+    #[test]
+    fn crl_entry_accepts_reason_with_colon() {
+        let pubkey = crate::ss58::encode(&[0x11; 32]);
+        let raw = format!(
+            r#"{{"pubkey_ss58":"{pubkey}","revoked_at_unix_secs":1700000000,"reason":"chargeback: disputed"}}"#
+        );
+        let parsed: CrlEntry =
+            serde_json::from_str(&raw).expect("colon in reason must be accepted");
+        assert_eq!(parsed.reason, "chargeback: disputed");
+    }
+
+    #[test]
+    fn admin_crl_revoke_request_rejects_reason_with_line_break() {
+        let pubkey = crate::ss58::encode(&[0x22; 32]);
+        let raw = format!(r#"{{"pubkey_ss58":"{pubkey}","reason":"abuse\nmore"}}"#);
+        assert!(
+            serde_json::from_str::<AdminCrlRevokeRequest>(&raw).is_err(),
+            "a reason containing a line break must be rejected at deserialization"
+        );
+    }
+
+    #[test]
+    fn admin_crl_revoke_request_accepts_reason_with_colon() {
+        let pubkey = crate::ss58::encode(&[0x22; 32]);
+        let raw = format!(r#"{{"pubkey_ss58":"{pubkey}","reason":"abuse: repeated"}}"#);
+        let parsed: AdminCrlRevokeRequest =
+            serde_json::from_str(&raw).expect("colon in reason must be accepted");
+        assert_eq!(parsed.reason, "abuse: repeated");
+    }
+
+    #[test]
+    fn crl_canonical_message_is_sorted_by_pubkey_and_pinned() {
+        let addr_a = crate::ss58::encode(&[0x00; 32]);
+        let addr_b = crate::ss58::encode(&[0x07; 32]);
+        assert_eq!(addr_a, "wb7kgy8FF4rx4tamkksPfoymeeeZVXLrnSjbBxCun3XhP9DnB");
+        assert_eq!(addr_b, "wb7uuPeV524ZMHaQnrrsgXkRNirw6ntzcMaQ1vgcNsMEMRCDm");
+
+        // Entries handed in reverse-sorted order to prove the function
+        // sorts them by pubkey before building the preimage.
+        let entries = vec![
+            CrlEntry {
+                pubkey_ss58: PubkeySs58::try_from(addr_b.clone()).unwrap(),
+                revoked_at_unix_secs: 1_700_000_100,
+                reason: "abuse".to_owned(),
+            },
+            CrlEntry {
+                pubkey_ss58: PubkeySs58::try_from(addr_a.clone()).unwrap(),
+                revoked_at_unix_secs: 1_700_000_000,
+                reason: "chargeback".to_owned(),
+            },
+        ];
+        let message = crl_canonical_message(3, 1_700_000_200, &entries);
+        let expected = format!(
+            "v1\n3\n1700000200\n{addr_a}:1700000000:chargeback\n{addr_b}:1700000100:abuse\n"
+        );
+        assert_eq!(String::from_utf8(message).unwrap(), expected);
+    }
+
+    #[test]
+    fn enroll_exit_request_debug_redacts_token() {
+        let req = EnrollExitRequest {
+            token: "wkey-exit-abc123-supersecret".to_owned(),
+        };
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("supersecret"),
+            "Debug must redact the enrollment token: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn admin_create_voucher_response_debug_redacts_secret() {
+        let resp = AdminCreateVoucherResponse {
+            voucher_secret: "ABCD-EFGH-JKMN-PQRS".to_owned(),
+            secret_hash_hex: "deadbeef".to_owned(),
+            duration_secs: 3600,
+            max_redemptions: Some(1),
+            valid_until_unix_secs: None,
+        };
+        let debug = format!("{resp:?}");
+        assert!(
+            !debug.contains("ABCD-EFGH-JKMN-PQRS"),
+            "Debug must redact the show-once voucher secret: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn admin_create_enrollment_token_response_debug_redacts_token() {
+        let resp = AdminCreateEnrollmentTokenResponse {
+            token: "wkey-exit-abc123-supersecret".to_owned(),
+            id: TokenId::from_hex_validated("abc123abc123".to_owned()),
+            expires_at: 1_700_086_400,
+            scope_country: CountryCode::try_from("FR").unwrap(),
+            scope_city: "Paris".to_owned(),
+            scope_weight: 100,
+        };
+        let debug = format!("{resp:?}");
+        assert!(
+            !debug.contains("supersecret"),
+            "Debug must redact the show-once clear token: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn hwqual_evaluate_marks_standard_class_for_mid_tier_nic() {
+        let mut q = sample_hwqual();
+        q.nic_speed_mbps = 2500;
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::Go);
+        assert_eq!(
+            q.capacity_class, "standard",
+            "2.5G NIC is below the high-class 10G floor"
+        );
+    }
+
+    #[test]
+    fn hwqual_evaluate_marks_entry_class_for_1g_nic() {
+        let mut q = sample_hwqual();
+        q.nic_speed_mbps = 1_000;
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::Go);
+        assert_eq!(
+            q.capacity_class, "entry",
+            "1G NIC clears the floor but is below the standard tier"
+        );
+    }
+
+    #[test]
+    fn hwqual_evaluate_fails_a_nic_below_the_floor() {
+        let mut q = sample_hwqual();
+        q.nic_speed_mbps = 999;
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::NoGo);
+        assert!(
+            q.reasons.contains("NIC below 1 Gbit/s"),
+            "reason names the NIC floor: {}",
+            q.reasons
+        );
+    }
+
+    #[test]
+    fn hwqual_evaluate_fails_a_box_with_too_few_cores() {
+        let mut q = sample_hwqual();
+        q.cpu_cores = 1;
+        let q = q.evaluate();
+        assert_eq!(q.verdict, ExitHwQualVerdict::NoGo);
+        assert!(
+            q.reasons.contains("fewer than 2 cores"),
+            "reason names the core floor: {}",
+            q.reasons
+        );
+    }
+
+    #[test]
+    fn hwqual_summary_go_one_liner_contains_class_and_go() {
+        let q = sample_hwqual().evaluate();
+        let summary = q.summary();
+        assert!(summary.starts_with("GO:"), "summary: {summary}");
+        assert!(summary.contains("high-class"), "summary: {summary}");
+    }
+
+    #[test]
+    fn hwqual_summary_no_go_one_liner_contains_no_go_and_bracketed_reasons() {
+        let mut q = sample_hwqual();
+        q.aes_ni = false;
+        let q = q.evaluate();
+        let summary = q.summary();
+        assert!(summary.starts_with("NO_GO:"), "summary: {summary}");
+        assert!(
+            summary.contains("[no AES-NI"),
+            "summary must bracket the reasons: {summary}"
         );
     }
 
