@@ -13,13 +13,19 @@
 //! wire break and requires bumping [`RELEASE_MANIFEST_VERSION`], never
 //! mutating the v1 shape (golden vector pins it).
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::redact;
 
 /// Current manifest format version.
 pub const RELEASE_MANIFEST_VERSION: u32 = 1;
+
+/// Maximum accepted `json` input length for [`verify_release_manifest`].
+/// The parse runs before any signature check, so this caps what an
+/// unauthenticated payload can make the verifier allocate; a real
+/// manifest is well under 1 KiB.
+pub const MAX_MANIFEST_JSON_LEN: usize = 64 * 1024;
 
 /// Signed release manifest (full wire form, embedded verbatim in the
 /// exit heartbeat response and stored by warren-api).
@@ -68,6 +74,29 @@ struct UnsignedReleaseManifest<'a> {
     signed_at: u64,
     expires_at: u64,
     signer_pubkey_hex: &'a str,
+}
+
+/// Single home of the preimage bytes: both [`sign_release_manifest`] and
+/// [`verify_release_manifest`] derive them from the same struct, so the
+/// two sides cannot diverge on what is signed.
+///
+/// # Panics
+///
+/// Panics if `serde_json::to_vec` fails, which is infallible for this
+/// owned-scalar schema.
+fn canonical_preimage(m: &SignedReleaseManifest) -> Vec<u8> {
+    let unsigned = UnsignedReleaseManifest {
+        version: m.version,
+        release_version: &m.release_version,
+        channel: &m.channel,
+        binary_sha256_hex: &m.binary_sha256_hex,
+        binary_size: m.binary_size,
+        generation: m.generation,
+        signed_at: m.signed_at,
+        expires_at: m.expires_at,
+        signer_pubkey_hex: &m.signer_pubkey_hex,
+    };
+    serde_json::to_vec(&unsigned).expect("UnsignedReleaseManifest JSON serialization is infallible")
 }
 
 /// Result of a successful [`verify_release_manifest`]. The crate stays
@@ -134,6 +163,13 @@ pub enum ReleaseError {
     /// Signature does not verify against the canonical preimage.
     #[error("release manifest signature verification failed")]
     BadSignature,
+    /// Input longer than [`MAX_MANIFEST_JSON_LEN`], rejected before
+    /// parsing (pre-authentication allocation cap).
+    #[error("signed release manifest input too large: {got} bytes")]
+    InputTooLarge {
+        /// Length actually received.
+        got: usize,
+    },
 }
 
 /// Signs a release manifest. Offline signer side only (`wapi
@@ -156,22 +192,7 @@ pub fn sign_release_manifest(
     signer_key: &SigningKey,
 ) -> SignedReleaseManifest {
     let signer_pubkey_hex = hex::encode(signer_key.verifying_key().as_bytes());
-    let unsigned = UnsignedReleaseManifest {
-        version: RELEASE_MANIFEST_VERSION,
-        release_version,
-        channel,
-        binary_sha256_hex,
-        binary_size,
-        generation,
-        signed_at,
-        expires_at,
-        signer_pubkey_hex: &signer_pubkey_hex,
-    };
-    let canonical = serde_json::to_vec(&unsigned)
-        .expect("UnsignedReleaseManifest JSON serialization is infallible");
-    let signature = signer_key.sign(&canonical);
-
-    SignedReleaseManifest {
+    let mut manifest = SignedReleaseManifest {
         version: RELEASE_MANIFEST_VERSION,
         release_version: release_version.to_owned(),
         channel: channel.to_owned(),
@@ -181,8 +202,11 @@ pub fn sign_release_manifest(
         signed_at,
         expires_at,
         signer_pubkey_hex,
-        signature_hex: hex::encode(signature.to_bytes()),
-    }
+        signature_hex: String::new(),
+    };
+    let signature = signer_key.sign(&canonical_preimage(&manifest));
+    manifest.signature_hex = hex::encode(signature.to_bytes());
+    manifest
 }
 
 /// Verifies a signed release manifest against the pinned signer pubkey.
@@ -199,10 +223,14 @@ pub fn sign_release_manifest(
 /// - [`ReleaseError::InvalidHex`] / [`ReleaseError::PubkeyNotOnCurve`]:
 ///   malformed key/signature material.
 /// - [`ReleaseError::BadSignature`]: signature does not verify.
+/// - [`ReleaseError::InputTooLarge`]: input over [`MAX_MANIFEST_JSON_LEN`].
 pub fn verify_release_manifest(
     json: &str,
     pinned_signer_pubkey_hex: &str,
 ) -> Result<VerifiedRelease, ReleaseError> {
+    if json.len() > MAX_MANIFEST_JSON_LEN {
+        return Err(ReleaseError::InputTooLarge { got: json.len() });
+    }
     let signed: SignedReleaseManifest = serde_json::from_str(json)?;
     if signed.version != RELEASE_MANIFEST_VERSION {
         return Err(ReleaseError::UnsupportedVersion {
@@ -231,21 +259,8 @@ pub fn verify_release_manifest(
         .map_err(|_| ReleaseError::InvalidHex)?;
     let signature = Signature::from_bytes(&sig_bytes);
 
-    let unsigned = UnsignedReleaseManifest {
-        version: signed.version,
-        release_version: &signed.release_version,
-        channel: &signed.channel,
-        binary_sha256_hex: &signed.binary_sha256_hex,
-        binary_size: signed.binary_size,
-        generation: signed.generation,
-        signed_at: signed.signed_at,
-        expires_at: signed.expires_at,
-        signer_pubkey_hex: &signed.signer_pubkey_hex,
-    };
-    let canonical = serde_json::to_vec(&unsigned)
-        .expect("UnsignedReleaseManifest JSON serialization is infallible");
     pubkey
-        .verify(&canonical, &signature)
+        .verify_strict(&canonical_preimage(&signed), &signature)
         .map_err(|_| ReleaseError::BadSignature)?;
 
     Ok(VerifiedRelease {

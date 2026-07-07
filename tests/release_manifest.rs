@@ -9,7 +9,8 @@
 
 use ed25519_dalek::SigningKey;
 use warren_contract::release::{
-    RELEASE_MANIFEST_VERSION, ReleaseError, sign_release_manifest, verify_release_manifest,
+    MAX_MANIFEST_JSON_LEN, RELEASE_MANIFEST_VERSION, ReleaseError, sign_release_manifest,
+    verify_release_manifest,
 };
 
 fn seeded_key() -> SigningKey {
@@ -125,6 +126,22 @@ fn verified_release_expiry_boundary() {
 
     assert!(!v.is_expired(1_700_086_399), "one second before expiry");
     assert!(v.is_expired(1_700_086_400), "expiry instant is stale");
+}
+
+#[test]
+fn oversized_input_is_rejected_before_parsing() {
+    // Pre-authentication allocation cap: an unauthenticated payload over
+    // MAX_MANIFEST_JSON_LEN must be rejected before the JSON parser (or the
+    // signature check) ever runs. The padding does not need to be valid
+    // JSON: the length gate fires first.
+    let oversized = "a".repeat(MAX_MANIFEST_JSON_LEN + 1);
+    let pin = hex::encode(seeded_key().verifying_key().as_bytes());
+
+    let err = verify_release_manifest(&oversized, &pin).unwrap_err();
+    assert!(
+        matches!(err, ReleaseError::InputTooLarge { got } if got == MAX_MANIFEST_JSON_LEN + 1),
+        "input over the cap must be rejected as InputTooLarge, got {err:?}"
+    );
 }
 
 #[test]
