@@ -27,7 +27,7 @@
 //! This codec is byte-for-byte identical to
 //! [`@polkadot/util-crypto`](https://github.com/polkadot-js/common)
 //! `encodeAddress(pubkey, 13295)` / `decodeAddress`. The
-//! [`tests::polkadot_reference_vectors`] test pins the exact strings
+//! `polkadot_reference_vectors` test pins the exact strings
 //! produced by `@polkadot/util-crypto` v14, so any divergence (here or
 //! in the JS layer) fails CI. The desktop renderer uses the JS library
 //! directly; this Rust codec serves the daemon, the backend

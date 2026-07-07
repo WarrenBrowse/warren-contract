@@ -2,7 +2,15 @@
 //! and the backend both depend on, so the wire contract cannot drift.
 //!
 //! - [`ss58`]: wallet-identity address codec (Warren prefix `13295`, `wb…`).
+//! - [`auth`]: the `X-Warren-*` request-signing rule (header names,
+//!   canonical message, client-side signer).
 //! - [`dto`]: the HTTP `/v1` API request/response types.
+//! - [`release`]: the offline-signed exit-release manifest (fleet update
+//!   authority).
+//!
+//! The `warren-discovery` workspace member (crate `warren-discovery-core`)
+//! carries the signed relay list / roster / multi-hop directory formats and
+//! the relay selector.
 
 pub mod auth;
 pub mod dto;
