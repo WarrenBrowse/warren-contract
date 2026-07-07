@@ -15,6 +15,13 @@ pub const HEADER_NONCE: &str = "X-Warren-Nonce";
 ///
 /// Format frozen: never change without rotating to `/v2`. Must stay strictly
 /// identical on both sides, otherwise no signature verifies.
+///
+/// Injectivity contract: fields are `\n`-delimited, so `method` and `path`
+/// MUST be newline-free (guaranteed for HTTP tokens and URL paths; both
+/// sides must reject anything else before signing/verifying). A `/v2`
+/// rotation should also prepend a fixed domain tag (e.g.
+/// `"warren-http-auth-v2\n"`) so a wallet-key signature over this message
+/// can never collide with another Warren signing context.
 #[must_use]
 pub fn canonical_message(
     method: &str,
@@ -24,6 +31,11 @@ pub fn canonical_message(
     body_hash_hex: &str,
 ) -> String {
     use std::fmt::Write as _;
+
+    debug_assert!(
+        !method.contains('\n') && !path.contains('\n'),
+        "newline in method/path breaks canonical-message injectivity"
+    );
     let mut s = String::with_capacity(
         method.len() + path.len() + 20 + nonce_hex.len() + body_hash_hex.len() + 4,
     );
@@ -140,5 +152,32 @@ mod tests {
         key.verifying_key()
             .verify(canonical.as_bytes(), &signature)
             .expect("signature must verify against the canonical message");
+    }
+
+    #[test]
+    fn sign_request_golden() {
+        // Golden vector for a sibling-language SDK implementer: Ed25519 is
+        // deterministic per RFC 8032, so a from-scratch reimplementation of
+        // `sign_request` must reproduce these exact four values.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let body = br#"{"voucher":"abc"}"#;
+        let sig = sign_request(
+            &key,
+            "POST",
+            "/v1/session/open",
+            body,
+            1_700_000_000,
+            [0x11; 16],
+        );
+        assert_eq!(
+            sig.pubkey_ss58,
+            "wbD3tHJV5AgFpSALyuLDDzbKUmFqM2Tu5A3JGFyZYEawasvDj"
+        );
+        assert_eq!(
+            sig.signature_hex,
+            "8fd6e1664ba8c076b5ae1e2b9d9cfc714db11b75626f2f7e3111a686ddabe0a32e66366891839a598a29965dc02d8eb4345cba01a285b877a8bb9f3e7068d606"
+        );
+        assert_eq!(sig.timestamp, 1_700_000_000);
+        assert_eq!(sig.nonce_hex, "11111111111111111111111111111111");
     }
 }
