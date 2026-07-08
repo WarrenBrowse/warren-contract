@@ -1869,6 +1869,28 @@ pub struct AdminPricingTierCreatedResponse {
     pub id: i64,
 }
 
+/// Request body for `PUT /v1/admin/pricing/ladder`: atomically replace
+/// the whole tier ladder of one currency with a linear month ladder
+/// (tier k grants k months for `k * price_per_month_units`). The
+/// webhook only sees the paid amount, so one tier per purchasable
+/// month count is required; this body is the 2-number form of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPricingLadderBody {
+    /// Currency token, case-insensitive on the server side.
+    pub currency: String,
+    /// Price of one month, in the currency's smallest unit.
+    pub price_per_month_units: u64,
+    /// Ladder depth: tiers are generated for 1..=max_months.
+    pub max_months: u32,
+}
+
+/// Response body of `PUT /v1/admin/pricing/ladder`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPricingLadderResponse {
+    /// Number of enabled tiers after the replace (== max_months).
+    pub tiers: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Admin: enrollment tokens.
 // ---------------------------------------------------------------------------
@@ -2420,6 +2442,20 @@ mod tests {
             .to_string();
         assert!(!msg.contains(bad), "full value must not leak: {msg}");
         assert!(msg.contains("NotACoun…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn pricing_ladder_body_pins_its_wire_field_names() {
+        let body: AdminPricingLadderBody = serde_json::from_str(
+            r#"{"currency":"EUR","price_per_month_units":700,"max_months":36}"#,
+        )
+        .expect("wire form must deserialize");
+        assert_eq!(body.currency, "EUR");
+        assert_eq!(body.price_per_month_units, 700);
+        assert_eq!(body.max_months, 36);
+        let json = serde_json::to_string(&AdminPricingLadderResponse { tiers: 36 })
+            .expect("serialize response");
+        assert_eq!(json, r#"{"tiers":36}"#, "response wire shape is pinned");
     }
 
     #[test]
