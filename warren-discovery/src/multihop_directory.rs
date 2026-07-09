@@ -615,7 +615,63 @@ pub struct VerifiedExit {
     pub cover_domain: Option<String>,
 }
 
+/// A trusted node projected as an **entry** hop (blind QUIC forwarder). Same
+/// vetting as [`VerifiedExit`]; carries the co-located exit id so the
+/// per-circuit `entry != exit` rule can be enforced without a node handle.
+#[derive(Debug, Clone)]
+pub struct VerifiedEntry {
+    /// Entry-relay QUIC endpoint to dial.
+    pub endpoint: std::net::SocketAddr,
+    /// ISO 3166-1 alpha-2 country.
+    pub country: String,
+    /// City.
+    pub city: String,
+    /// Selection weight.
+    pub weight: u64,
+    /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
+    pub cover_domain: Option<String>,
+    /// The exit id of the SAME physical node (relay and exit are co-located),
+    /// the identity used to refuse `entry == exit` circuits.
+    pub exit_id: [u8; 16],
+}
+
+impl VerifiedExit {
+    /// The circuit view of this exit dialed through a **distinct** entry
+    /// node: the dial endpoint and SNI become the entry's, while the exit
+    /// identity, HPKE key and routing id (everything the sealed frame needs)
+    /// stay this exit's. Returns `None` when the entry is the exit's own
+    /// node: a node forwarding to itself sees both sides of the circuit,
+    /// which breaks the unlinkability the second hop exists for.
+    #[must_use]
+    pub fn via_entry(&self, entry: &VerifiedEntry) -> Option<VerifiedExit> {
+        if entry.exit_id == self.exit_id {
+            return None;
+        }
+        Some(VerifiedExit {
+            endpoint: entry.endpoint,
+            cover_domain: entry.cover_domain.clone(),
+            ..self.clone()
+        })
+    }
+}
+
 impl VerifiedMultiHopDirectory {
+    /// The trusted nodes projected as entry hops.
+    #[must_use]
+    pub fn entries(&self) -> Vec<VerifiedEntry> {
+        self.nodes
+            .iter()
+            .map(|n| VerifiedEntry {
+                endpoint: n.relay.endpoint,
+                country: n.country.clone(),
+                city: n.city.clone(),
+                weight: n.weight,
+                cover_domain: n.relay.cover_domain.clone(),
+                exit_id: *n.exit.exit_id.as_bytes(),
+            })
+            .collect()
+    }
+
     /// The trusted exits as a flat client dial view.
     #[must_use]
     pub fn exits(&self) -> Vec<VerifiedExit> {
@@ -1130,5 +1186,67 @@ mod tests {
         let err =
             verify_multihop_directory_any(&oversize, &[], &[]).expect_err("oversize must reject");
         assert!(matches!(err, DirectoryError::InputTooLarge));
+    }
+
+    #[test]
+    fn circuit_dials_a_distinct_entry_and_refuses_the_same_node() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![signed_node(&op, 1, "fr", 1), signed_node(&op, 2, "de", 2)],
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+
+        let exits = v.exits();
+        let exit = exits.iter().find(|e| e.country == "fr").expect("fr exit");
+        let entries = v.entries();
+        let de_entry = entries.iter().find(|e| e.country == "de").expect("de entry");
+
+        let dialed = exit
+            .via_entry(de_entry)
+            .expect("two distinct nodes form a circuit");
+        // The dial target and SNI come from the entry; everything the sealed
+        // frame needs (exit identity, HPKE key, routing id) stays the exit's.
+        assert_eq!(dialed.endpoint, de_entry.endpoint);
+        assert_eq!(dialed.cover_domain, de_entry.cover_domain);
+        assert_eq!(dialed.exit_id, exit.exit_id);
+        assert_eq!(dialed.exit_ed25519_pubkey, exit.exit_ed25519_pubkey);
+        assert_eq!(
+            dialed.exit_x25519_multihop_pubkey,
+            exit.exit_x25519_multihop_pubkey
+        );
+        assert_eq!(dialed.country, exit.country, "display stays the exit's");
+
+        let fr_entry = entries.iter().find(|e| e.country == "fr").expect("fr entry");
+        assert!(
+            exit.via_entry(fr_entry).is_none(),
+            "entry == exit node must be refused (unlinkability rule)"
+        );
+    }
+
+    #[test]
+    fn entries_expose_the_relay_view_of_every_vouched_node() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![signed_node(&op, 1, "fr", 1), signed_node(&op, 2, "de", 2)],
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+
+        let entries = v.entries();
+        assert_eq!(entries.len(), 2);
+        let de = entries.iter().find(|e| e.country == "de").expect("de");
+        let de_node = v.nodes.iter().find(|n| n.country == "de").expect("node");
+        assert_eq!(de.endpoint, de_node.relay.endpoint);
+        assert_eq!(de.exit_id, *de_node.exit.exit_id.as_bytes());
+        assert_eq!(de.weight, de_node.weight);
     }
 }
