@@ -620,6 +620,9 @@ pub struct VerifiedExit {
 /// per-circuit `entry != exit` rule can be enforced without a node handle.
 #[derive(Debug, Clone)]
 pub struct VerifiedEntry {
+    /// The relay's Ed25519 identity (TLS RPK of the dialed hop), also the
+    /// handle for cross-checking the node against the signed relay list.
+    pub relay_ed25519_pubkey: [u8; 32],
     /// Entry-relay QUIC endpoint to dial.
     pub endpoint: std::net::SocketAddr,
     /// ISO 3166-1 alpha-2 country.
@@ -662,6 +665,7 @@ impl VerifiedMultiHopDirectory {
         self.nodes
             .iter()
             .map(|n| VerifiedEntry {
+                relay_ed25519_pubkey: n.relay.relay_ed25519_pubkey,
                 endpoint: n.relay.endpoint,
                 country: n.country.clone(),
                 city: n.city.clone(),
@@ -1246,6 +1250,7 @@ mod tests {
         let de = entries.iter().find(|e| e.country == "de").expect("de");
         let de_node = v.nodes.iter().find(|n| n.country == "de").expect("node");
         assert_eq!(de.endpoint, de_node.relay.endpoint);
+        assert_eq!(de.relay_ed25519_pubkey, de_node.relay.relay_ed25519_pubkey);
         assert_eq!(de.exit_id, *de_node.exit.exit_id.as_bytes());
         assert_eq!(de.weight, de_node.weight);
     }
