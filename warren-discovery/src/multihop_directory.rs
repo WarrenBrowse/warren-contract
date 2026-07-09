@@ -639,12 +639,18 @@ pub struct VerifiedEntry {
 }
 
 impl VerifiedExit {
-    /// The circuit view of this exit dialed through a **distinct** entry
-    /// node: the dial endpoint and SNI become the entry's, while the exit
-    /// identity, HPKE key and routing id (everything the sealed frame needs)
-    /// stay this exit's. Returns `None` when the entry is the exit's own
-    /// node: a node forwarding to itself sees both sides of the circuit,
-    /// which breaks the unlinkability the second hop exists for.
+    /// The circuit view of this exit dialed through a **distinct** entry node.
+    ///
+    /// The client dials the ENTRY and forwards to the exit, so three fields
+    /// take the entry's values: the dial `endpoint`, the `cover_domain` SNI,
+    /// and `exit_ed25519_pubkey` (which the transport consumes as the RPK /
+    /// relay-auth identity of the hop it actually dials, NOT as the exit's
+    /// identity). Only what the HPKE-sealed setup frame needs stays the
+    /// exit's: `exit_x25519_multihop_pubkey` and the `exit_id` routing tag.
+    ///
+    /// Returns `None` when the entry is the exit's own node: a node forwarding
+    /// to itself sees both sides of the circuit, breaking the unlinkability the
+    /// second hop exists for.
     #[must_use]
     pub fn via_entry(&self, entry: &VerifiedEntry) -> Option<VerifiedExit> {
         if entry.exit_id == self.exit_id {
@@ -653,6 +659,7 @@ impl VerifiedExit {
         Some(VerifiedExit {
             endpoint: entry.endpoint,
             cover_domain: entry.cover_domain.clone(),
+            exit_ed25519_pubkey: entry.relay_ed25519_pubkey,
             ..self.clone()
         })
     }
@@ -1213,12 +1220,23 @@ mod tests {
         let dialed = exit
             .via_entry(de_entry)
             .expect("two distinct nodes form a circuit");
-        // The dial target and SNI come from the entry; everything the sealed
-        // frame needs (exit identity, HPKE key, routing id) stays the exit's.
+        // The dial target, SNI and the DIALED-HOP identity come from the entry;
+        // only what the sealed frame needs (HPKE key, routing id) stays the
+        // exit's. The ed25519 is the RPK / relay-auth identity of the hop we
+        // actually dial (the entry), NOT the exit: proven the hard way in
+        // real-network testing, where keeping the exit's ed25519 made the entry
+        // relay reject the circuit with "relay-auth signature does not match".
         assert_eq!(dialed.endpoint, de_entry.endpoint);
         assert_eq!(dialed.cover_domain, de_entry.cover_domain);
         assert_eq!(dialed.exit_id, exit.exit_id);
-        assert_eq!(dialed.exit_ed25519_pubkey, exit.exit_ed25519_pubkey);
+        assert_eq!(
+            dialed.exit_ed25519_pubkey, de_entry.relay_ed25519_pubkey,
+            "dialed-hop identity must be the entry relay's, not the exit's"
+        );
+        assert_ne!(
+            dialed.exit_ed25519_pubkey, exit.exit_ed25519_pubkey,
+            "distinct nodes have distinct dialed identities"
+        );
         assert_eq!(
             dialed.exit_x25519_multihop_pubkey,
             exit.exit_x25519_multihop_pubkey
