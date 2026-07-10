@@ -34,9 +34,8 @@ pub use json_io::JsonError;
 pub use multihop_directory::{
     DirectoryError, MULTIHOP_DIRECTORY_VERSION, MultiHopDirectoryDraft, NodeEntry,
     SignedMultiHopDirectory, VerifiedEntry, VerifiedExit, VerifiedMultiHopDirectory,
-    ensure_lossless_roundtrip,
-    redact_exit_endpoints, sign_directory_draft, sign_multihop_directory,
-    verify_multihop_directory, verify_multihop_directory_any,
+    ensure_lossless_roundtrip, redact_exit_endpoints, sign_directory_draft,
+    sign_multihop_directory, verify_multihop_directory, verify_multihop_directory_any,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{

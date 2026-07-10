@@ -1215,7 +1215,10 @@ mod tests {
         let exits = v.exits();
         let exit = exits.iter().find(|e| e.country == "fr").expect("fr exit");
         let entries = v.entries();
-        let de_entry = entries.iter().find(|e| e.country == "de").expect("de entry");
+        let de_entry = entries
+            .iter()
+            .find(|e| e.country == "de")
+            .expect("de entry");
 
         let dialed = exit
             .via_entry(de_entry)
@@ -1243,7 +1246,10 @@ mod tests {
         );
         assert_eq!(dialed.country, exit.country, "display stays the exit's");
 
-        let fr_entry = entries.iter().find(|e| e.country == "fr").expect("fr entry");
+        let fr_entry = entries
+            .iter()
+            .find(|e| e.country == "fr")
+            .expect("fr entry");
         assert!(
             exit.via_entry(fr_entry).is_none(),
             "entry == exit node must be refused (unlinkability rule)"
