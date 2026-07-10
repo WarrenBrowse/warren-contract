@@ -70,10 +70,12 @@ fn session_open_response_shape() {
         admitted: true,
         max: 5,
         current: 1,
+        reason: None,
     };
     assert_eq!(
         json(&resp),
-        serde_json::json!({ "admitted": true, "max": 5, "current": 1 })
+        serde_json::json!({ "admitted": true, "max": 5, "current": 1 }),
+        "reason must be omitted when None (pre-v2 exits pin this shape)"
     );
     roundtrips(&resp);
 }
@@ -509,10 +511,11 @@ fn session_open_request_omits_absent_max_devices() {
     let addr = ss58::encode(&[0x66; 32]);
     let device_id_hex = "a".repeat(32);
     let req = SessionOpenRequest {
-        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
-        device_id_hex: device_id_hex.clone(),
+        pubkey_ss58: Some(PubkeySs58::try_from(addr.clone()).unwrap()),
+        device_id_hex: Some(device_id_hex.clone()),
         exit_id: "exit-fr-1".to_owned(),
         max_devices: None,
+        token_b64: None,
     };
     assert_eq!(
         json(&req),
@@ -521,7 +524,7 @@ fn session_open_request_omits_absent_max_devices() {
             "device_id_hex": device_id_hex,
             "exit_id": "exit-fr-1",
         }),
-        "max_devices must be omitted when None"
+        "max_devices and the v2 token field must be omitted when None"
     );
     roundtrips(&req);
 }
@@ -531,10 +534,11 @@ fn session_open_request_carries_max_devices_when_present() {
     let addr = ss58::encode(&[0x77; 32]);
     let device_id_hex = "b".repeat(32);
     let req = SessionOpenRequest {
-        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
-        device_id_hex: device_id_hex.clone(),
+        pubkey_ss58: Some(PubkeySs58::try_from(addr.clone()).unwrap()),
+        device_id_hex: Some(device_id_hex.clone()),
         exit_id: "exit-fr-1".to_owned(),
         max_devices: Some(3),
+        token_b64: None,
     };
     assert_eq!(
         json(&req),

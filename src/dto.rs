@@ -2319,24 +2319,76 @@ pub fn is_valid_device_id_hex(s: &str) -> bool {
     is_lower_hex(s, DEVICE_ID_HEX_LEN)
 }
 
+/// Expected length of a `serial_hex` field: a 32-byte token serial
+/// (SHA-256 of the token input, doc 64) as 64 lowercase hex chars.
+const TOKEN_SERIAL_HEX_LEN: usize = 64;
+
+/// `true` if `s` is exactly 64 lowercase hex chars (= a 32-byte token
+/// serial). Shared by the handler boundary check, same posture as
+/// [`is_valid_device_id_hex`].
+#[must_use]
+pub fn is_valid_token_serial_hex(s: &str) -> bool {
+    is_lower_hex(s, TOKEN_SERIAL_HEX_LEN)
+}
+
 /// `POST /v1/session/open` request body (sent by an exit on behalf of a
 /// connecting client).
+///
+/// Two accepted shapes (doc 64 phase 1 dual-shape migration):
+/// - **legacy (wallet)**: `pubkey_ss58` + `device_id_hex` present,
+///   `token_b64` absent. The ledger caps distinct devices per account.
+/// - **v2 (anonymous token)**: `token_b64` present, the wallet fields
+///   absent. The API verifies the Privacy Pass token offline and leases
+///   its serial; the exit never names the subscriber.
+///
+/// A body carrying both shapes (or neither) is refused with 400.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionOpenRequest {
     /// CLIENT wallet SS58 pubkey - the account whose device count is
-    /// capped. NOT the exit's auth identity.
-    pub pubkey_ss58: PubkeySs58,
+    /// capped. NOT the exit's auth identity. Legacy shape only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey_ss58: Option<PubkeySs58>,
     /// Self-asserted device id: 16 bytes as 32 lowercase hex chars.
-    /// Validated at the handler boundary (400 on malformed).
-    pub device_id_hex: String,
+    /// Validated at the handler boundary (400 on malformed). Legacy
+    /// shape only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id_hex: Option<String>,
     /// Exit currently serving this device (diagnostics; stored on the
     /// lease). An operator label like `exit-fr-1`, NOT the 16-byte
     /// [`ExitId`] used by [`RegisterExitRequest`].
     pub exit_id: String,
     /// Optional cap override the exit may pass from its CLI. When
     /// absent, the server uses `warren_config::MAX_DEVICES_PER_ACCOUNT`.
+    /// Legacy shape only (the v2 cap is enforced at token issuance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_devices: Option<u32>,
+    /// Anonymous session token (full Privacy Pass token bytes, base64url
+    /// no pad, doc 64). Presence selects the v2 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_b64: Option<String>,
+}
+
+/// Why a `session/open` was refused (`admitted == false`). Extends the
+/// legacy implicit "device limit reached" with the v2 token outcomes so
+/// the exit can react (e.g. present the next epoch's token on
+/// `WrongEpoch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRejectReason {
+    /// Legacy shape: the account already holds `max` live devices.
+    DeviceLimitReached,
+    /// v2: the token does not verify under the CURRENT epoch's issuer
+    /// key (expired epoch token, or presented too early). Recovery: the
+    /// exit presents the next epoch's token.
+    WrongEpoch,
+    /// v2: the token is malformed or its signature does not verify.
+    InvalidToken,
+    /// v2: another live lease already holds this token serial (a
+    /// double-spend from a different exit).
+    SerialInUse,
+    /// Forward compatibility: a reason this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `POST /v1/session/open` response body. Always returned with HTTP 200;
@@ -2345,21 +2397,41 @@ pub struct SessionOpenRequest {
 pub struct SessionOpenResponse {
     /// `true` if the device was admitted (fresh lease or renewal).
     pub admitted: bool,
-    /// Cap in force (echoed for logging / client display).
+    /// Cap in force (echoed for logging / client display). Always 1 for
+    /// the v2 token shape (one live lease per serial).
     pub max: u32,
     /// Distinct live devices currently leased for this account. Equals
     /// `max` when `admitted` is `false`.
     pub current: u32,
+    /// Why admission was refused; absent when `admitted` is `true` (and
+    /// on responses from pre-v2 servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SessionRejectReason>,
 }
 
 /// `POST /v1/session/close` request body (graceful disconnect reported
-/// by the exit).
+/// by the exit). Dual-shape like [`SessionOpenRequest`]: legacy closes
+/// by `(pubkey_ss58, device_id_hex)`, v2 closes by `(serial_hex,
+/// exit_id)` (the lease slot the open was recorded under).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCloseRequest {
-    /// CLIENT wallet SS58 pubkey whose lease is released.
-    pub pubkey_ss58: PubkeySs58,
+    /// CLIENT wallet SS58 pubkey whose lease is released. Legacy shape
+    /// only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey_ss58: Option<PubkeySs58>,
     /// Device id whose lease is released (16 bytes, 32 lowercase hex).
-    pub device_id_hex: String,
+    /// Legacy shape only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id_hex: Option<String>,
+    /// Token serial whose lease is released (32 bytes, 64 lowercase
+    /// hex). v2 shape only. The exit computes it offline from the token
+    /// it admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_hex: Option<String>,
+    /// The closing exit's operator label, matching the `exit_id` the
+    /// lease was opened under. v2 shape only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_id: Option<String>,
 }
 
 // ---- Anonymous session credentials (Privacy Pass, ADR-0006 / doc 64) ----
