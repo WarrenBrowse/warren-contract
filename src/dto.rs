@@ -2400,6 +2400,90 @@ pub struct SessionCloseRequest {
     pub device_id_hex: String,
 }
 
+// ---- Anonymous session credentials (Privacy Pass, ADR-0006 / doc 64) ----
+
+/// `POST /v1/tokens/issue` request body (wallet-signed by the client).
+///
+/// One entry per epoch the client wants tokens for. Each entry MUST carry
+/// exactly `warren_config::TOKEN_QUOTA_PER_EPOCH` blinded messages: a fixed
+/// batch so the request pattern reveals no device-count signal. Blinded
+/// messages and blind signatures are base64url (no padding).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenIssueRequest {
+    /// Per-epoch blinded batches.
+    pub epochs: Vec<TokenEpochRequest>,
+}
+
+/// One epoch's blinded batch in a [`TokenIssueRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenEpochRequest {
+    /// Epoch index (`unix_secs / TOKEN_EPOCH_SECS`) the tokens are for.
+    pub epoch: u64,
+    /// Base64url (no pad) blinded messages, one per requested token.
+    pub blinded: Vec<String>,
+}
+
+/// `POST /v1/tokens/issue` response body (always HTTP 200; per-epoch outcome
+/// in the body). An epoch the policy refused carries `issued=false` and a
+/// `reject_reason`, so a partially-covered request still returns the epochs
+/// that could be signed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenIssueResponse {
+    /// Per-epoch results, aligned by `epoch` with the request.
+    pub epochs: Vec<TokenEpochResponse>,
+}
+
+/// One epoch's issuance outcome in a [`TokenIssueResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenEpochResponse {
+    /// Epoch index this result is for.
+    pub epoch: u64,
+    /// `true` if the batch was signed.
+    pub issued: bool,
+    /// Base64url (no pad) blind signatures, aligned with the request's
+    /// `blinded` order. Empty when `issued` is `false`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blind_signatures: Vec<String>,
+    /// Hex `token_key_id` the batch was signed under, so the client knows
+    /// which epoch key to finalize/verify against. `None` when not issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_key_id: Option<String>,
+    /// Machine-readable refusal reason when `issued` is `false`
+    /// (`out_of_window` | `not_subscribed` | `already_issued` | `bad_batch`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_reason: Option<String>,
+}
+
+/// `GET /v1/tokens/keys` response: the issuer public keys for the currently
+/// spendable/verifiable window, so an exit or a client can fetch the key for
+/// the epoch it needs without contacting the issuer per redemption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenIssuerDirectory {
+    /// The issuer name pinned into every `TokenChallenge`.
+    pub issuer_name: String,
+    /// Privacy Pass token type (always `2`).
+    pub token_type: u16,
+    /// Epoch length in seconds, so a verifier can compute the current epoch.
+    pub epoch_secs: u64,
+    /// One key per epoch in the published window.
+    pub keys: Vec<TokenIssuerKey>,
+}
+
+/// One epoch's public key in a [`TokenIssuerDirectory`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenIssuerKey {
+    /// Epoch this key signs/verifies.
+    pub epoch: u64,
+    /// Hex `token_key_id` (`SHA-256` of the RSASSA-PSS SPKI).
+    pub token_key_id: String,
+    /// Base64url (no pad) RSASSA-PSS `SubjectPublicKeyInfo` DER.
+    pub spki_b64: String,
+    /// First unix second the key is valid (epoch start).
+    pub not_before: u64,
+    /// Exclusive last unix second the key is valid (epoch end).
+    pub not_after: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
