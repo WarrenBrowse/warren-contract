@@ -2230,44 +2230,6 @@ pub struct IncidentPubkeyMismatchRequest {
     pub ts_unix: u64,
 }
 
-/// `POST /v1/support` body. Problem-report endpoint: any
-/// authenticated client (signer pubkey matches the `Warren-Pubkey`
-/// header) can submit a redacted log bundle + user message so an
-/// operator can debug a stuck install without out-of-band channels.
-///
-/// **Privacy**: the server only persists the bundle when an admin
-/// inbox is configured; the signer identity is logged at INFO level
-/// for correlation but never stored in a queryable DB column. The
-/// wallet pubkey is *implicit* in the auth signature (no need to
-/// echo it in the body).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SupportReportRequest {
-    /// Free-form user message (max 4096 chars enforced server-side).
-    /// Empty allowed.
-    pub user_message: String,
-    /// Redacted log lines (max 256 KB enforced server-side). Newline-
-    /// joined. The Android side ships an empty payload when the
-    /// "Include logs" checkbox is unchecked.
-    pub redacted_logs: String,
-    /// Optional client-supplied app version string ("1.2.3"). Helps
-    /// the operator triage without re-asking.
-    #[serde(default)]
-    pub app_version: String,
-    /// Optional client-supplied platform tag ("android-arm64",
-    /// "ios-arm64", "macos-arm64"). Free-form.
-    #[serde(default)]
-    pub platform: String,
-}
-
-/// `POST /v1/support` response. The server returns an opaque
-/// reference id the operator can lookup in the support inbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SupportReportResponse {
-    /// 32-char hex reference id (UUID v4 minus dashes). Echoed back
-    /// to the user so they can quote it in a follow-up email.
-    pub reference_id: String,
-}
-
 /// Aggregate row returned by `GET /v1/admin/exits/health`. The wire
 /// schema is intentionally narrow: it carries only the three fields
 /// listed below, no signer identity, no IP, no session id (no-log
