@@ -2079,6 +2079,27 @@ pub struct AdminStripeRefundResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Admin: Google Play refund (POST /v1/admin/subscribers/{pubkey}/google-refund).
+// ---------------------------------------------------------------------------
+
+/// Response for `POST /v1/admin/subscribers/{pubkey_ss58}/google-refund`.
+///
+/// Returned on HTTP 200 when the Google Play Developer API accepted the
+/// `orders.refund` call (with `revoke=true`). `refunded` is always `true`
+/// on a 200 response. `subscription_expired` is `true` when the Warren
+/// subscription was also expired; it may be `false` if the subscriber had
+/// no active subscription at the time of the call (the Google refund
+/// itself still succeeded).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminGoogleRefundResponse {
+    /// Always `true` on a 200 response.
+    pub refunded: bool,
+    /// `true` when the Warren subscription was expired as part of this
+    /// call; `false` when no subscription row was found.
+    pub subscription_expired: bool,
+}
+
+// ---------------------------------------------------------------------------
 // EU CRD art. 11a withdrawal queue (POST /v1/withdrawal + admin processing).
 // ---------------------------------------------------------------------------
 
@@ -2144,6 +2165,14 @@ pub struct AdminWithdrawalProcessResponse {
     pub status: String,
     /// The Stripe refund id when a refund was issued; `None` for a reject.
     pub stripe_refund_id: Option<String>,
+    /// `true` when the refund also terminated the linked Warren access
+    /// (unredeemed voucher cancelled, or the redeeming subscriber's
+    /// subscription expired). `false` when the payment reference could not
+    /// be resolved to a voucher (past retention or unknown): the money
+    /// movement still succeeded, only the best-effort access termination
+    /// did not apply. Defaults to `false` for responses from older servers.
+    #[serde(default)]
+    pub access_revoked: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2690,6 +2719,42 @@ mod tests {
         assert_eq!(json, r#"{"expires_at":1700000000}"#);
         let parsed: MobilePaymentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn withdrawal_process_response_access_revoked_defaults_false_on_legacy_json() {
+        // Additive-field compat: a warren-admin built against this crate must
+        // still parse a response from an older warren-api that does not emit
+        // `access_revoked` yet.
+        let legacy = r#"{"id":"ref1","status":"refunded","stripe_refund_id":"re_1"}"#;
+        let parsed: AdminWithdrawalProcessResponse =
+            serde_json::from_str(legacy).expect("legacy JSON without access_revoked must parse");
+        assert!(
+            !parsed.access_revoked,
+            "absent access_revoked must default to false"
+        );
+
+        let with_field =
+            r#"{"id":"ref1","status":"refunded","stripe_refund_id":"re_1","access_revoked":true}"#;
+        let parsed: AdminWithdrawalProcessResponse =
+            serde_json::from_str(with_field).expect("new JSON must parse");
+        assert!(parsed.access_revoked, "explicit true must round-trip");
+    }
+
+    #[test]
+    fn admin_google_refund_response_pins_wire_shape() {
+        let resp = AdminGoogleRefundResponse {
+            refunded: true,
+            subscription_expired: false,
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        assert_eq!(
+            json, r#"{"refunded":true,"subscription_expired":false}"#,
+            "wire shape is pinned"
+        );
+        let parsed: AdminGoogleRefundResponse = serde_json::from_str(&json).expect("deserialize");
+        assert!(parsed.refunded);
+        assert!(!parsed.subscription_expired);
     }
 
     #[test]
