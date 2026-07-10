@@ -2499,6 +2499,15 @@ pub struct TokenIssuerDirectory {
     pub token_type: u16,
     /// Epoch length in seconds, so a verifier can compute the current epoch.
     pub epoch_secs: u64,
+    /// Domain-separator label hashed (with the epoch index) into every
+    /// token's `redemption_context`. Published here so clients rebuild the
+    /// challenge from the directory alone, with no hardcoded copy to drift.
+    pub context_label: String,
+    /// Exact number of blinded messages an issue request must carry per
+    /// epoch (the fixed batch size; also the device cap).
+    pub quota_per_epoch: u32,
+    /// How many epochs ahead of the current one the issuer signs.
+    pub prefetch_epochs: u64,
     /// One key per epoch in the published window.
     pub keys: Vec<TokenIssuerKey>,
 }
