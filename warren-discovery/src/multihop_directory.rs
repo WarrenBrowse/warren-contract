@@ -26,12 +26,16 @@
 //!    operational key. Verified with [`warrenguard_multihop::verify_relay_descriptor`]
 //!    / [`warrenguard_multihop::verify_exit_descriptor`].
 //!
-//! **Accepted risk**: per-node `weight` and the `city` label are carried in
-//! the server envelope only; the operational attestation
-//! (`attestation_hex`) binds `country` / `asn` / the exit Ed25519 identity,
-//! not `weight` or `city`. A compromised **online** signer can therefore
-//! still steer client traffic weighting, or mislabel a node's city, without
-//! the offline operational key catching it.
+//! **Accepted risk**: per-node `weight`, the `city` label, and the optional
+//! `edge_cert_sha256` browser-edge cert pin are carried in the server
+//! envelope only; the operational attestation (`attestation_hex`) binds
+//! `country` / `asn` / the exit Ed25519 identity, not `weight`, `city`, or
+//! the edge pin. A compromised **online** signer can therefore still steer
+//! client traffic weighting, mislabel a node's city, or swap the edge pin,
+//! without the offline operational key catching it. The edge pin is
+//! DoS-only, though: the datapath stays HPKE-sealed to the
+//! operational-attested `exit_x25519_multihop_pubkey`, so a bad pin only
+//! breaks the browser's WebTransport edge connection, never confidentiality.
 //!
 //! # Unified dual-role fleet
 //!
@@ -108,6 +112,17 @@ pub struct NodeEntry {
     ///
     /// Additive: `skip_serializing_if` keeps an edge-less directory byte-identical
     /// to the pre-edge wire, so no directory-version rotation is required.
+    ///
+    /// Rollout ordering constraint: every client must model this field
+    /// BEFORE warren-api starts overlaying pins into served directories. An
+    /// older client that does not know the key fails the WHOLE directory
+    /// once a pin is served, not just the edge feature: an old Rust build's
+    /// `NodeEntry` silently drops the unknown field at deserialize, rebuilds
+    /// a canonical preimage missing it, and the server envelope no longer
+    /// matches ([`DirectoryError::BadEnvelopeSignature`]); an old TS build's
+    /// object-shape check rejects the unknown key outright. Same
+    /// client-first ordering as the ADR-0004 `cover_domain` rollout
+    /// (`warren-core/docs/X509-COVER-DOMAIN.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_cert_sha256: Option<String>,
 }
