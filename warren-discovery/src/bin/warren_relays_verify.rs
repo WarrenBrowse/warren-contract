@@ -110,6 +110,7 @@ mod tests {
                     }],
                 }],
                 cover_domain: None,
+                port_forward: None,
             }],
             server_key,
             1,

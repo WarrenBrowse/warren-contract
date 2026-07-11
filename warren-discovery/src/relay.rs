@@ -382,6 +382,12 @@ pub struct WarrenRelay {
     /// straight from the v7 wire booleans (no egress address published).
     egress_v4_cap: bool,
     egress_v6_cap: bool,
+    /// Node-level NAT-PMP port-forwarding capability (doc 79). `Some(true)` if
+    /// the exit runs an enabled NAT-PMP gateway, `Some(false)` if it is
+    /// explicitly disabled, `None` if the signed roster carried no flag (exit
+    /// binary pre-dates it: unknown). Comes straight from the v9 wire; the
+    /// client only offers or prefers port forwarding when it is `Some(true)`.
+    port_forward: Option<bool>,
     /// Derived dial target (entry listeners → sockets), cached at
     /// construction so the hot dial path stays cheap.
     endpoint_addr: WarrenExitAddr,
@@ -421,6 +427,7 @@ impl WarrenRelay {
             exit,
             egress_v4_cap,
             egress_v6_cap,
+            port_forward: None,
             endpoint_addr,
         }
     }
@@ -455,6 +462,7 @@ impl WarrenRelay {
             exit: Vec::new(),
             egress_v4_cap: egress_v4,
             egress_v6_cap: egress_v6,
+            port_forward: None,
             endpoint_addr,
         }
     }
@@ -469,6 +477,15 @@ impl WarrenRelay {
         if let Some(domain) = cover_domain {
             self.endpoint_addr = self.endpoint_addr.with_cover_domain(domain);
         }
+        self
+    }
+
+    /// Stamps the node-level NAT-PMP port-forwarding capability (doc 79) carried
+    /// by the v9 signed roster. `None` (legacy exit that pre-dates the flag)
+    /// leaves the capability unknown, which the client treats as "not offered".
+    #[must_use]
+    pub fn with_port_forward(mut self, port_forward: Option<bool>) -> Self {
+        self.port_forward = port_forward;
         self
     }
 
@@ -560,6 +577,15 @@ impl WarrenRelay {
     #[must_use]
     pub fn egress_v6(&self) -> bool {
         self.egress_v6_cap
+    }
+
+    /// Node-level NAT-PMP port-forwarding capability (doc 79): `Some(true)` if
+    /// the exit runs an enabled NAT-PMP gateway, `Some(false)` if explicitly
+    /// disabled, `None` if unknown (roster carried no flag). The client only
+    /// offers or prefers port forwarding when this is `Some(true)`.
+    #[must_use]
+    pub fn port_forward(&self) -> Option<bool> {
+        self.port_forward
     }
 
     /// Distinct ALPN tokens advertised across this node's `entry`
@@ -738,6 +764,40 @@ mod tests {
         assert!(!n.egress_v4(), "egress v4 cap from wire bool (false)");
         assert!(n.egress_v6(), "egress v6 cap from wire bool (true)");
         assert!(n.has_ipv4(), "still v4-dialable via entry");
+    }
+
+    #[test]
+    fn port_forward_capability_defaults_unknown_and_is_stamped_by_builder() {
+        // doc 79: a node built without the flag reports `None` (unknown, treated
+        // as "not offered" by the client). `with_port_forward` stamps the signed
+        // roster capability, and an explicitly-disabled exit stays distinct from
+        // an enabled one and from unknown.
+        let v4 = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let base = WarrenRelay::from_public(
+            pubkey(),
+            ExitId::from_bytes([0xaa; 16]),
+            Location::new("NL", "Amsterdam"),
+            100,
+            true,
+            vec![ingress(v4, &[443])],
+            true,
+            false,
+        );
+        assert_eq!(
+            base.port_forward(),
+            None,
+            "unknown until the roster sets it"
+        );
+        assert_eq!(
+            base.clone().with_port_forward(Some(true)).port_forward(),
+            Some(true),
+            "enabled NAT-PMP surfaces as Some(true)"
+        );
+        assert_eq!(
+            base.with_port_forward(Some(false)).port_forward(),
+            Some(false),
+            "explicitly-disabled NAT-PMP stays Some(false), distinct from unknown"
+        );
     }
 
     #[test]
