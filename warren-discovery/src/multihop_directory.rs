@@ -1383,4 +1383,19 @@ mod tests {
             "circuit pins the entry's edge cert (the dialed WebTransport)"
         );
     }
+
+    #[test]
+    #[ignore = "generator: prints the cross-impl golden replayed by warren-sdk-ts"]
+    fn print_edge_cert_golden_for_ts_crossimpl() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 24940);
+        node.edge_cert_sha256 = Some("ab".repeat(32));
+        let signed = build(&root, &op, &server, vec![node]);
+        println!(
+            "EDGE_GOLDEN_JSON={}",
+            serde_json::to_string(&signed).unwrap()
+        );
+        println!("EDGE_GOLDEN_SERVER={}", hexk(&server));
+        println!("EDGE_GOLDEN_ROOT={}", hexk(&root));
+    }
 }
