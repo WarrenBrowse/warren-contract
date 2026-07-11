@@ -852,6 +852,15 @@ pub struct RegisterExitRequest {
     /// (a heartbeat that omits it must not blank a stored verdict).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hwqual: Option<ExitHwQual>,
+    /// 64-char hex SHA-256 of the node's ephemeral P-256 EdgeConnect cert, when
+    /// the node serves the browser WebTransport edge (on the well-known
+    /// `warrenguard_config::WARREN_EDGE_PORT`). warren-api overlays it into the
+    /// signed multi-hop directory so browsers can pin the self-signed cert with
+    /// no manual SHA publication. Live data: the cert rotates on restart, so the
+    /// latest heartbeat wins (never preserved across an omitting heartbeat).
+    /// `None` from an exit with no edge or a legacy binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_cert_sha256_hex: Option<String>,
 }
 
 /// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
@@ -3207,6 +3216,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            edge_cert_sha256_hex: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3248,6 +3258,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            edge_cert_sha256_hex: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3289,6 +3300,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            edge_cert_sha256_hex: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3320,6 +3332,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            edge_cert_sha256_hex: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
