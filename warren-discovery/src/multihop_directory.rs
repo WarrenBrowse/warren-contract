@@ -94,6 +94,22 @@ pub struct NodeEntry {
     /// identity under the offline operational key so a compromised
     /// warren-api cannot fake circuit diversity or redirect the exit pin.
     pub attestation_hex: String,
+    /// 64-char hex SHA-256 of the node's ephemeral P-256 EdgeConnect cert, for
+    /// browser `serverCertificateHashes` pinning of the WebTransport edge.
+    /// `None` when the node advertises no edge.
+    ///
+    /// Server-envelope tier, NOT operational-attested (like `weight` / `city`):
+    /// the edge cert rotates every <=14 days, faster than the offline signing
+    /// cadence, so warren-api overlays the live hash from the exit heartbeat and
+    /// re-signs it with its online key at serve time. A compromised online key
+    /// could swap the pin, but the inner datapath is HPKE-sealed to the
+    /// operational-attested `exit.exit_x25519_multihop_pubkey`, so the worst
+    /// case is DoS, never a confidentiality break (warren-core doc 66).
+    ///
+    /// Additive: `skip_serializing_if` keeps an edge-less directory byte-identical
+    /// to the pre-edge wire, so no directory-version rotation is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_cert_sha256: Option<String>,
 }
 
 /// Signed multi-hop directory (full wire form). Served verbatim by
@@ -613,6 +629,10 @@ pub struct VerifiedExit {
     pub dns_disabled: bool,
     /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
     pub cover_domain: Option<String>,
+    /// SHA-256 hex of the dialed hop's EdgeConnect cert for browser pinning,
+    /// if it advertises an edge. After [`VerifiedExit::via_entry`] this is the
+    /// ENTRY's edge cert (the WebTransport the browser actually connects to).
+    pub edge_cert_sha256: Option<String>,
 }
 
 /// A trusted node projected as an **entry** hop (blind QUIC forwarder). Same
@@ -633,6 +653,9 @@ pub struct VerifiedEntry {
     pub weight: u64,
     /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
     pub cover_domain: Option<String>,
+    /// SHA-256 hex of this entry hop's EdgeConnect cert for browser pinning,
+    /// if it advertises an edge; the pin for the WebTransport a browser dials.
+    pub edge_cert_sha256: Option<String>,
     /// The exit id of the SAME physical node (relay and exit are co-located),
     /// the identity used to refuse `entry == exit` circuits.
     pub exit_id: [u8; 16],
@@ -659,6 +682,7 @@ impl VerifiedExit {
         Some(VerifiedExit {
             endpoint: entry.endpoint,
             cover_domain: entry.cover_domain.clone(),
+            edge_cert_sha256: entry.edge_cert_sha256.clone(),
             exit_ed25519_pubkey: entry.relay_ed25519_pubkey,
             ..self.clone()
         })
@@ -678,6 +702,7 @@ impl VerifiedMultiHopDirectory {
                 city: n.city.clone(),
                 weight: n.weight,
                 cover_domain: n.relay.cover_domain.clone(),
+                edge_cert_sha256: n.edge_cert_sha256.clone(),
                 exit_id: *n.exit.exit_id.as_bytes(),
             })
             .collect()
@@ -698,6 +723,7 @@ impl VerifiedMultiHopDirectory {
                 weight: n.weight,
                 dns_disabled: n.exit.dns_disabled,
                 cover_domain: n.relay.cover_domain.clone(),
+                edge_cert_sha256: n.edge_cert_sha256.clone(),
             })
             .collect()
     }
@@ -752,6 +778,7 @@ pub mod test_helpers {
             asn,
             weight: 100,
             attestation_hex: hex::encode(attestation),
+            edge_cert_sha256: None,
         }
     }
 
@@ -871,6 +898,7 @@ mod tests {
             asn,
             weight: 100,
             attestation_hex: hex::encode(attestation),
+            edge_cert_sha256: None,
         }
     }
 
@@ -1277,5 +1305,82 @@ mod tests {
         assert_eq!(de.relay_ed25519_pubkey, de_node.relay.relay_ed25519_pubkey);
         assert_eq!(de.exit_id, *de_node.exit.exit_id.as_bytes());
         assert_eq!(de.weight, de_node.weight);
+    }
+
+    #[test]
+    fn edge_cert_absent_keeps_the_pre_edge_wire_byte_identical() {
+        // An edge-less directory must serialize with NO `edge_cert_sha256` key,
+        // so the additive field never forces a directory-version rotation:
+        // existing v2 clients see byte-identical bytes and keep verifying.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        assert!(
+            !json.contains("edge_cert_sha256"),
+            "absent edge cert must not appear on the wire: {json}"
+        );
+        verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("edge-less directory still verifies");
+    }
+
+    #[test]
+    fn edge_cert_is_server_signed_and_flows_to_the_verified_views() {
+        // Set before signing: the pin rides the server envelope and must survive
+        // verification, surfacing on both the exit and entry projections.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let pin = "ab".repeat(32);
+        let mut node = signed_node(&op, 1, "fr", 1);
+        node.edge_cert_sha256 = Some(pin.clone());
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("directory with an edge pin verifies");
+        assert_eq!(v.exits()[0].edge_cert_sha256.as_deref(), Some(pin.as_str()));
+        assert_eq!(
+            v.entries()[0].edge_cert_sha256.as_deref(),
+            Some(pin.as_str())
+        );
+    }
+
+    #[test]
+    fn tampering_the_edge_cert_pin_breaks_the_server_envelope() {
+        // Proves the pin is INSIDE the server signature, not a bare transported
+        // field: swapping it after signing must fail the envelope. This is why
+        // the canonical (signed) tier beats a non-canonical field: a compromised
+        // serve host cannot silently substitute the browser cert pin.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        node.edge_cert_sha256 = Some("ab".repeat(32));
+        let mut signed = build(&root, &op, &server, vec![node]);
+        signed.nodes[0].edge_cert_sha256 = Some("cd".repeat(32));
+        let json = serde_json::to_string(&signed).unwrap();
+        let err = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect_err("a swapped edge pin must fail the server envelope");
+        assert!(matches!(err, DirectoryError::BadEnvelopeSignature));
+    }
+
+    #[test]
+    fn via_entry_pins_the_dialed_entry_edge_cert() {
+        // The browser connects to the ENTRY's WebTransport, so the circuit view
+        // must carry the ENTRY's edge cert, not the exit node's own.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut exit_node = signed_node(&op, 1, "fr", 1);
+        exit_node.edge_cert_sha256 = Some("11".repeat(32));
+        let mut entry_node = signed_node(&op, 2, "de", 2);
+        entry_node.edge_cert_sha256 = Some("22".repeat(32));
+        let signed = build(&root, &op, &server, vec![exit_node, entry_node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        let exit = v.exits().into_iter().find(|e| e.country == "fr").unwrap();
+        let entry = v.entries().into_iter().find(|e| e.country == "de").unwrap();
+        let dialed = exit
+            .via_entry(&entry)
+            .expect("two distinct nodes form a circuit");
+        assert_eq!(
+            dialed.edge_cert_sha256,
+            Some("22".repeat(32)),
+            "circuit pins the entry's edge cert (the dialed WebTransport)"
+        );
     }
 }
