@@ -148,6 +148,14 @@ pub enum Currency {
     XMR,
     /// Bitcoin satoshi (the on-wire unit for Lightning amounts).
     SAT,
+    /// Romanian leu (ISO 4217), smallest unit: ban.
+    RON,
+    /// Canadian dollar (ISO 4217), smallest unit: cent.
+    CAD,
+    /// Pound sterling (ISO 4217), smallest unit: penny.
+    GBP,
+    /// Swiss franc (ISO 4217), smallest unit: rappen.
+    CHF,
 }
 
 impl Currency {
@@ -160,6 +168,10 @@ impl Currency {
             Self::BTC => "BTC",
             Self::XMR => "XMR",
             Self::SAT => "SAT",
+            Self::RON => "RON",
+            Self::CAD => "CAD",
+            Self::GBP => "GBP",
+            Self::CHF => "CHF",
         }
     }
 }
@@ -324,6 +336,8 @@ pub enum PaymentMethod {
     /// Google Play Store (Play Billing).
     #[serde(rename = "googleplay")]
     GooglePlay,
+    /// PayPal (processed through Stripe).
+    Paypal,
 }
 
 impl PaymentMethod {
@@ -344,6 +358,7 @@ impl PaymentMethod {
             "manual" => Ok(Self::Manual),
             "appstore" => Ok(Self::AppStore),
             "googleplay" => Ok(Self::GooglePlay),
+            "paypal" => Ok(Self::Paypal),
             other => Err(ValidationError::InvalidPaymentMethod(crate::redact(other))),
         }
     }
@@ -360,6 +375,7 @@ impl PaymentMethod {
             Self::Manual => "manual",
             Self::AppStore => "appstore",
             Self::GooglePlay => "googleplay",
+            Self::Paypal => "paypal",
         }
     }
 }
@@ -2625,6 +2641,7 @@ mod tests {
             (PaymentMethod::Manual, "\"manual\""),
             (PaymentMethod::AppStore, "\"appstore\""),
             (PaymentMethod::GooglePlay, "\"googleplay\""),
+            (PaymentMethod::Paypal, "\"paypal\""),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(
@@ -2645,6 +2662,7 @@ mod tests {
             ("\"manual\"", PaymentMethod::Manual),
             ("\"appstore\"", PaymentMethod::AppStore),
             ("\"googleplay\"", PaymentMethod::GooglePlay),
+            ("\"paypal\"", PaymentMethod::Paypal),
         ] {
             let pm: PaymentMethod = serde_json::from_str(wire).expect("deserialize");
             assert_eq!(pm, expected, "wire {wire:?} must parse to {expected:?}");
@@ -2674,6 +2692,7 @@ mod tests {
             PaymentMethod::Manual,
             PaymentMethod::AppStore,
             PaymentMethod::GooglePlay,
+            PaymentMethod::Paypal,
         ] {
             let parsed = PaymentMethod::from_wire(v.as_wire()).expect("round-trip");
             assert_eq!(parsed, v);
@@ -3317,6 +3336,10 @@ mod tests {
             (Currency::BTC, "\"BTC\""),
             (Currency::XMR, "\"XMR\""),
             (Currency::SAT, "\"SAT\""),
+            (Currency::RON, "\"RON\""),
+            (Currency::CAD, "\"CAD\""),
+            (Currency::GBP, "\"GBP\""),
+            (Currency::CHF, "\"CHF\""),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, expected, "variant {variant:?} wire form");
