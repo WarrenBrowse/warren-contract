@@ -3368,6 +3368,57 @@ mod tests {
     }
 
     #[test]
+    fn register_exit_request_edge_cert_sha256_hex_round_trips_and_omits_when_absent() {
+        // The exit reports its ephemeral EdgeConnect cert pin on the heartbeat
+        // so warren-api can overlay it into the signed multi-hop directory.
+        // `Some(pin)` must survive the wire round-trip, a legacy heartbeat
+        // that omits the key must decode to `None`, and `None` must not
+        // appear on the wire (skip_serializing_if).
+        let pin = "ab".repeat(32);
+        let req = RegisterExitRequest {
+            telemetry: None,
+            endpoints: sample_endpoints(),
+            country: CountryCode::try_from("FR").unwrap(),
+            city: "Paris".to_owned(),
+            weight: 100,
+            active: true,
+            exit_id: None,
+            exit_x25519_multihop_pubkey_hex: None,
+            version: None,
+            active_sessions: None,
+            cover_domain: None,
+            update_status: None,
+            hwqual: None,
+            edge_cert_sha256_hex: Some(pin.clone()),
+            port_forward: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.edge_cert_sha256_hex.as_deref(),
+            Some(pin.as_str()),
+            "edge_cert_sha256_hex must survive the wire round-trip"
+        );
+
+        let legacy = r#"{"endpoints":[{"addr":"198.51.100.1","family":"ipv4","ingress":true,"egress":true,"listeners":[{"port":51820,"transport":"quic","alpn":"h3"}]}],"country":"FR","city":"Paris","weight":100,"active":true}"#;
+        let parsed: RegisterExitRequest = serde_json::from_str(legacy).unwrap();
+        assert!(
+            parsed.edge_cert_sha256_hex.is_none(),
+            "legacy heartbeat without edge_cert_sha256_hex must decode to None"
+        );
+
+        let none_req = RegisterExitRequest {
+            edge_cert_sha256_hex: None,
+            ..req
+        };
+        let json = serde_json::to_string(&none_req).unwrap();
+        assert!(
+            !json.contains("edge_cert_sha256_hex"),
+            "None edge_cert_sha256_hex must NOT appear on the wire: {json}"
+        );
+    }
+
+    #[test]
     fn register_exit_request_port_forward_round_trips_and_defaults_none() {
         // doc 79: the exit reports whether its NAT-PMP port-forwarding gateway
         // is enabled. `Some(true)` and `Some(false)` must both survive the wire
