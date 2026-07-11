@@ -1401,10 +1401,11 @@ mod tests {
     }
 
     #[test]
-    fn edge_cert_absent_keeps_the_pre_edge_wire_byte_identical() {
+    fn edge_cert_absent_keeps_the_edge_key_off_the_wire() {
         // An edge-less directory must serialize with NO `edge_cert_sha256` key,
         // so the additive field never forces a directory-version rotation:
-        // existing v2 clients see byte-identical bytes and keep verifying.
+        // existing v2 clients see the same shape they always did and keep
+        // verifying.
         let (root, op, server) = (key(0x01), key(0x02), key(0x03));
         let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
         let json = serde_json::to_string(&signed).unwrap();
