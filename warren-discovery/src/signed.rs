@@ -1,5 +1,6 @@
-//! Signed `warren-relays.json` v8 - node (exit/relay/entry) distribution
-//! from warren-api to Warren clients. (v8 added the optional per-node
+//! Signed `warren-relays.json` v9 - node (exit/relay/entry) distribution
+//! from warren-api to Warren clients. (v9 added the optional per-node
+//! `port_forward` NAT-PMP capability flag; v8 added the optional per-node
 //! `cover_domain` for v6 X.509; the rest of the v7 minimization vocabulary
 //! below is unchanged.)
 //!
@@ -11,13 +12,13 @@
 //! client verifies with a known `server_pubkey` (TOFU at boot or
 //! hardcoded pin in prod).
 //!
-//! **Canonical format** (frozen at v8; any further mutation must rotate
-//! to v9):
+//! **Canonical format** (frozen at v9; any further mutation must rotate
+//! to v10):
 //!
 //! ```text
 //! canonical_bytes = serde_json::to_vec(&UnsignedRelayList {
-//!     version: 8,
-//!     nodes,            // each entry is a JsonNode (v8 vocabulary)
+//!     version: 9,
+//!     nodes,            // each entry is a JsonNode (v9 vocabulary)
 //!     generation,       // monotonic content version (anti-rollback)
 //!     signed_at,
 //!     expires_at,       // signed expiry (anti-freeze/replay)
@@ -83,7 +84,16 @@ use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 /// absent) to keep pre-v8 canonical bytes reproducible for nodes without
 /// it. A node carrying it is dialed via WebPKI SNI instead of the raw
 /// Ed25519 public-key pin.
-pub const SIGNED_VERSION: u32 = 8;
+///
+/// **v9 (port-forwarding capability, doc 79)** adds the optional per-node
+/// `port_forward`: whether the exit runs an enabled NAT-PMP gateway. Warren
+/// is mono-IP, so this is a per-exit capability toggle, not a second-IP
+/// announcement; the client only offers/prefers port forwarding on exits
+/// where it is active. Appended last on [`JsonNode`] (additive,
+/// `skip_serializing_if` when absent) so nodes without it keep reproducing
+/// their pre-v9 canonical bytes. Signing-canonical like every prior bump:
+/// lockstep rollout of warren-api, warren-relay-selector and warren-app.
+pub const SIGNED_VERSION: u32 = 9;
 
 /// **Wire** dial listener: a `port` plus the wire `transport` and the
 /// `alpn` token offered in the handshake. The app surfaces
@@ -153,12 +163,20 @@ pub struct JsonNode {
     /// v6 X.509 cover-domain SNI (wg-0005): the hostname on the exit's real
     /// certificate that the client dials and validates via WebPKI instead of
     /// pinning the exit's raw public key. `None` (skipped from the wire) keeps
-    /// the RPK handshake. Added in v8; must stay last to preserve field order.
+    /// the RPK handshake. Added in v8.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cover_domain: Option<String>,
+    /// Node-level NAT-PMP port-forwarding capability (doc 79): `Some(true)` if
+    /// the exit runs an enabled NAT-PMP gateway, `Some(false)` if explicitly
+    /// disabled, `None` (skipped from the wire) if the exit binary pre-dates
+    /// the flag. Warren is mono-IP, so this is a per-exit capability toggle,
+    /// not a second-IP announcement. Added in v9; must stay last to preserve
+    /// the canonical field order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_forward: Option<bool>,
 }
 
-/// **Signed** node list (full wire format, `relays.json` v8).
+/// **Signed** node list (full wire format, `relays.json` v9).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignedRelayList {
     /// Must equal [`SIGNED_VERSION`].
@@ -452,7 +470,8 @@ pub(crate) fn json_node_to_warren(n: JsonNode) -> Result<WarrenRelay, JsonError>
         n.egress.ipv4,
         n.egress.ipv6,
     )
-    .with_cover_domain(n.cover_domain))
+    .with_cover_domain(n.cover_domain)
+    .with_port_forward(n.port_forward))
 }
 
 #[cfg(test)]
@@ -491,6 +510,7 @@ mod tests {
                 listeners: vec![sample_listener()],
             }],
             cover_domain: None,
+            port_forward: None,
         }
     }
 
@@ -746,14 +766,14 @@ mod tests {
 
     #[test]
     fn signed_format_is_byte_stable_across_serializations() {
-        // Wire vector test: freeze the top-level field order for v8. Any
+        // Wire vector test: freeze the top-level field order for v9. Any
         // serde reordering invalidates every existing signature.
         let key = fixed_server_key();
         let signed = sign_relay_list(vec![], &key, 7, 42, 86442);
         let json = serde_json::to_string(&signed).expect("ser");
 
         let expected_field_order = [
-            r#""version":8"#,
+            r#""version":9"#,
             r#""nodes":[]"#,
             r#""generation":7"#,
             r#""signed_at":42"#,
@@ -771,24 +791,26 @@ mod tests {
     }
 
     #[test]
-    fn signed_version_is_pinned_at_8() {
+    fn signed_version_is_pinned_at_9() {
         // The client and every exit must agree on the signed relay-list wire
         // version. Bumping SIGNED_VERSION is a wire break: it needs a
         // coordinated exit redeploy plus updates to every consumer that pins the
         // number (warren-api `non_auth.rs`, the backend smoke script). Pinning it
         // here makes a silent bump impossible: change the number and this
         // dedicated test fails first, pointing straight at the contract.
-        assert_eq!(SIGNED_VERSION, 8);
+        assert_eq!(SIGNED_VERSION, 9);
     }
 
     #[test]
-    fn json_node_field_order_is_frozen_at_v8() {
+    fn json_node_field_order_is_frozen_at_v9() {
         // Wire vector test: freeze the JsonNode + JsonEndpoint +
         // JsonListener + JsonEgress + JsonLocation field order, including
-        // the v8 addition `cover_domain` (must serialize last). Any drift
-        // changes the canonical signing bytes for every entry.
+        // the v8 addition `cover_domain` and the v9 addition `port_forward`
+        // (which must serialize last). Any drift changes the canonical
+        // signing bytes for every entry.
         let mut node = sample_node();
         node.cover_domain = Some("cover.example.com".to_owned());
+        node.port_forward = Some(true);
         let json = serde_json::to_string(&node).expect("ser");
         let expected = [
             r#""id":"#,
@@ -809,6 +831,7 @@ mod tests {
             r#""transport":"#,
             r#""alpn":"#,
             r#""cover_domain":"#,
+            r#""port_forward":"#,
         ];
         let mut last = 0usize;
         for needle in expected {
@@ -932,20 +955,21 @@ mod tests {
     }
 
     #[test]
-    fn golden_vector_v8_signed_relay_list_is_frozen() {
+    fn golden_vector_v9_signed_relay_list_is_frozen() {
         // Wire vector (rule 40): freeze today's exact signed bytes for a
-        // representative v8 list, including one node WITH cover_domain (the
-        // v8 addition), produced from a deterministic key. If this drifts,
-        // deployed clients stop verifying lists from this build: bump
-        // SIGNED_VERSION instead of mutating the canonical shape.
+        // representative v9 list, including one node WITH cover_domain (v8) and
+        // port_forward (the v9 addition), produced from a deterministic key. If
+        // this drifts, deployed clients stop verifying lists from this build:
+        // bump SIGNED_VERSION instead of mutating the canonical shape.
         let key = SigningKey::from_bytes(&[0x07; 32]);
         let mut node = sample_node();
         node.cover_domain = Some("cover.example.com".to_owned());
+        node.port_forward = Some(true);
         let signed = sign_relay_list(vec![node], &key, 3, 1_700_000_000, 1_700_086_400);
         let json = serde_json::to_string(&signed).expect("serialize");
 
         let expected = concat!(
-            "{\"version\":8,",
+            "{\"version\":9,",
             "\"nodes\":[{\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\",",
             "\"exit_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
             "\"location\":{\"country\":\"FR\",\"city\":\"Paris\"},",
@@ -954,20 +978,102 @@ mod tests {
             "\"egress\":{\"ipv4\":true,\"ipv6\":false},",
             "\"endpoints\":[{\"addr\":\"127.0.0.1\",\"family\":\"ipv4\",",
             "\"listeners\":[{\"port\":443,\"transport\":\"quic\",\"alpn\":\"h3\"}]}],",
-            "\"cover_domain\":\"cover.example.com\"}],",
+            "\"cover_domain\":\"cover.example.com\",",
+            "\"port_forward\":true}],",
             "\"generation\":3,",
             "\"signed_at\":1700000000,",
             "\"expires_at\":1700086400,",
             "\"server_pubkey_hex\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\",",
-            "\"signature_hex\":\"a5bae5ceb3652c980951447d82e52d9424ccdd8017b524440658720834ae02f5",
-            "1062a32c328cee9dc7a8801ac39c52b749eef58eaeeb2dd258a2d455a429da0f\"}",
+            "\"signature_hex\":\"e10105dd20d69c690fc687e81f6825179f3472fb8ce2d517804b847bf4650eef",
+            "bde3ad70075c1cbd8dbb08e1b9b2715cdc7d5f4c0014ea1ed248a6283903ae0d\"}",
         );
         assert_eq!(
             json, expected,
-            "signed relay-list v8 wire bytes drifted (wire break: bump SIGNED_VERSION)"
+            "signed relay-list v9 wire bytes drifted (wire break: bump SIGNED_VERSION)"
         );
 
         let pin = hex::encode(key.verifying_key().as_bytes());
         verify_signed_relay_list(&json, Some(&pin)).expect("frozen vector must keep verifying");
+    }
+
+    #[test]
+    fn port_forward_flows_from_signed_node_to_resolved_relay() {
+        // doc 79: a v9 roster node carrying port_forward must surface the
+        // capability on the resolved relay so the client can gate the feature.
+        // Some(true)/Some(false)/absent(None) must all survive sign -> verify
+        // distinctly, and the flag must be part of the signed preimage.
+        let key = fixed_server_key();
+        let mut on = sample_node();
+        on.port_forward = Some(true);
+        let signed = sign_relay_list(vec![on], &key, 1, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).expect("serialize");
+        let verified = verify_signed_relay_list(&json, None).expect("verify must pass");
+        assert_eq!(
+            verified.relays.relays()[0].port_forward(),
+            Some(true),
+            "an enabled NAT-PMP exit must resolve to Some(true)"
+        );
+
+        let mut off = sample_node();
+        off.port_forward = Some(false);
+        let signed = sign_relay_list(vec![off], &key, 1, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).expect("serialize");
+        let verified = verify_signed_relay_list(&json, None).expect("verify must pass");
+        assert_eq!(
+            verified.relays.relays()[0].port_forward(),
+            Some(false),
+            "a disabled NAT-PMP exit must resolve to Some(false), distinct from unknown"
+        );
+    }
+
+    #[test]
+    fn absent_port_forward_is_skipped_and_preserves_node_bytes() {
+        // Additive-field discipline: a node without port_forward (legacy exit)
+        // must NOT emit the key (skip_serializing_if) and must resolve to
+        // `None` (unknown), so pre-v9 nodes reproduce byte-identical canonical
+        // bytes and keep verifying.
+        let node = sample_node();
+        assert_eq!(node.port_forward, None);
+        let node_json = serde_json::to_string(&node).expect("ser");
+        assert!(
+            !node_json.contains("port_forward"),
+            "absent port_forward must be skipped from the wire: {node_json}"
+        );
+
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![node], &key, 1, 1_700_000_000, 1_700_086_400);
+        let json = serde_json::to_string(&signed).expect("serialize");
+        let verified = verify_signed_relay_list(&json, None).expect("verify must pass");
+        assert_eq!(
+            verified.relays.relays()[0].port_forward(),
+            None,
+            "a node with no port_forward flag resolves to unknown"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_port_forward() {
+        // Anti-tamper: flipping a node's port_forward capability (e.g. to make
+        // a NAT-PMP-disabled exit appear capable) must break the signature.
+        let key = fixed_server_key();
+        let mut node = sample_node();
+        node.port_forward = Some(false);
+        let signed = sign_relay_list(vec![node], &key, 1, 1_700_000_000, 1_700_086_400);
+        let mut tampered = signed.clone();
+        tampered.nodes[0].port_forward = Some(true);
+        let json = serde_json::to_string(&tampered).unwrap();
+        let err = verify_signed_relay_list(&json, None).expect_err("tampered must fail");
+        assert!(matches!(err, SignedError::BadSignature));
+    }
+
+    #[test]
+    fn verify_rejects_pre_v9_canonical_format() {
+        // Breaking-change regression: the v8 version number must be rejected
+        // since the bump to v9 (v8-shaped body so the rejection is the version
+        // gate, not a deserialization miss). Pre-v9 clients and lists do not
+        // interoperate with v9 without a coordinated redeploy.
+        let json = r#"{"version":8,"nodes":[],"generation":0,"signed_at":0,"expires_at":0,"server_pubkey_hex":"00","signature_hex":"00"}"#;
+        let err = verify_signed_relay_list(json, None).expect_err("v8 must be rejected post-v9");
+        assert!(matches!(err, SignedError::UnsupportedVersion { got: 8 }));
     }
 }

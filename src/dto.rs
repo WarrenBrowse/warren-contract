@@ -852,6 +852,15 @@ pub struct RegisterExitRequest {
     /// (a heartbeat that omits it must not blank a stored verdict).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hwqual: Option<ExitHwQual>,
+    /// Whether this exit runs a NAT-PMP (RFC 6886) port-forwarding gateway
+    /// (`--enable-natpmp`, doc 79). Warren is mono-IP, so this announces a
+    /// per-exit capability toggle ("port forwarding enabled here"), not a
+    /// second IP: some exits disable NAT-PMP, and the client must only
+    /// offer/prefer port forwarding where it is actually active. Sticky
+    /// server-side like `hwqual` (a heartbeat that omits it must not blank a
+    /// stored value). `None` from an exit binary that pre-dates the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_forward: Option<bool>,
 }
 
 /// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
@@ -3207,6 +3216,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            port_forward: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3248,6 +3258,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            port_forward: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3289,6 +3300,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            port_forward: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3298,6 +3310,10 @@ mod tests {
         assert!(
             !json.contains("version"),
             "None version must NOT appear on the wire (skip_serializing_if): {json}"
+        );
+        assert!(
+            !json.contains("port_forward"),
+            "None port_forward must NOT appear on the wire (skip_serializing_if): {json}"
         );
     }
 
@@ -3320,6 +3336,7 @@ mod tests {
             cover_domain: None,
             update_status: None,
             hwqual: None,
+            port_forward: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3334,6 +3351,57 @@ mod tests {
         assert!(
             parsed.version.is_none(),
             "legacy heartbeat without version must decode to None"
+        );
+    }
+
+    #[test]
+    fn register_exit_request_port_forward_round_trips_and_defaults_none() {
+        // doc 79: the exit reports whether its NAT-PMP port-forwarding gateway
+        // is enabled. `Some(true)` and `Some(false)` must both survive the wire
+        // round-trip (the client gates the feature on this), and a legacy
+        // heartbeat that omits the field must decode to `None` (unknown), never
+        // a misleading `false`.
+        let req = RegisterExitRequest {
+            telemetry: None,
+            endpoints: sample_endpoints(),
+            country: CountryCode::try_from("FR").unwrap(),
+            city: "Paris".to_owned(),
+            weight: 100,
+            active: true,
+            exit_id: None,
+            exit_x25519_multihop_pubkey_hex: None,
+            version: None,
+            active_sessions: None,
+            cover_domain: None,
+            update_status: None,
+            hwqual: None,
+            port_forward: Some(true),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(
+            json.contains("\"port_forward\":true"),
+            "enabled NAT-PMP must appear on the wire: {json}"
+        );
+        let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.port_forward, Some(true));
+
+        let off = RegisterExitRequest {
+            port_forward: Some(false),
+            ..req
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.port_forward,
+            Some(false),
+            "an exit with NAT-PMP explicitly disabled must round-trip as Some(false)"
+        );
+
+        let legacy = r#"{"endpoints":[{"addr":"198.51.100.1","family":"ipv4","ingress":true,"egress":true,"listeners":[{"port":51820,"transport":"quic","alpn":"h3"}]}],"country":"FR","city":"Paris","weight":100,"active":true}"#;
+        let parsed: RegisterExitRequest = serde_json::from_str(legacy).unwrap();
+        assert!(
+            parsed.port_forward.is_none(),
+            "legacy heartbeat without port_forward must decode to None (unknown)"
         );
     }
 
