@@ -241,6 +241,17 @@ pub enum DirectoryError {
     /// payload can force.
     #[error("input exceeds the maximum allowed size")]
     InputTooLarge,
+    /// A node's `edge_cert_sha256` is `Some` but is not a well-formed
+    /// 64-char hex SHA-256, mirroring the TS verifier's `asFixedHex` check
+    /// (`packages/core/src/discovery/multihop.ts`) so a malformed pin is
+    /// rejected by every implementation rather than silently accepted only
+    /// by Rust.
+    #[error("edge_cert_sha256 is not a well-formed 64-char hex pin: {prefix}")]
+    MalformedEdgeCertPin {
+        /// Redacted prefix of the offending value (no-log discipline: never
+        /// the full pin).
+        prefix: String,
+    },
 }
 
 impl From<envelope::DecodeError> for DirectoryError {
@@ -250,6 +261,31 @@ impl From<envelope::DecodeError> for DirectoryError {
             envelope::DecodeError::PubkeyNotOnCurve => Self::PubkeyNotOnCurve,
         }
     }
+}
+
+/// `true` iff `s` is exactly 64 ASCII hex chars (either case), the length a
+/// SHA-256 hex digest must have. Mirrors the TS verifier's
+/// `asFixedHex(v, 32, 'edge_cert_sha256')` check byte for byte, so a
+/// malformed pin is rejected the same way by both implementations.
+fn is_valid_edge_cert_pin(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Fails on the first node whose `edge_cert_sha256` is `Some` but not a
+/// well-formed pin. Shared by the verify and sign paths: a malformed pin
+/// must be refused wherever it is encountered, not merely accepted by a
+/// lenient signer and only caught by a strict verifier (or vice versa).
+fn check_edge_cert_pins(nodes: &[NodeEntry]) -> Result<(), DirectoryError> {
+    for node in nodes {
+        if let Some(pin) = node.edge_cert_sha256.as_deref()
+            && !is_valid_edge_cert_pin(pin)
+        {
+            return Err(DirectoryError::MalformedEdgeCertPin {
+                prefix: warren_contract::redact(pin),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Fails when re-serializing a parsed [`MultiHopDirectoryDraft`] is LOSSY
@@ -289,12 +325,43 @@ pub fn ensure_lossless_roundtrip(raw: &[u8]) -> Result<(), DirectoryError> {
 /// offline and passed in; this function never holds the operational or
 /// root key. Intended for the warren-api side only.
 ///
+/// # Errors
+/// [`DirectoryError::MalformedEdgeCertPin`] if any node's `edge_cert_sha256`
+/// is `Some` but not a well-formed 64-char hex pin: refusing to sign here
+/// means a signer can never mint a directory a verifier would reject.
+///
 /// # Panics
 /// Panics only if `serde_json::to_vec(&UnsignedMultiHopDirectory)` fails,
 /// which is infallible for this owned-string/scalar schema.
-#[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn sign_multihop_directory(
+    nodes: Vec<NodeEntry>,
+    server_key: &SigningKey,
+    operational_pubkey: &VerifyingKey,
+    operational_cert: &[u8; 64],
+    generation: u64,
+    signed_at: u64,
+    expires_at: u64,
+) -> Result<SignedMultiHopDirectory, DirectoryError> {
+    check_edge_cert_pins(&nodes)?;
+    Ok(sign_multihop_directory_unchecked(
+        nodes,
+        server_key,
+        operational_pubkey,
+        operational_cert,
+        generation,
+        signed_at,
+        expires_at,
+    ))
+}
+
+/// Signs without the `edge_cert_sha256` format gate. Crate-private: every
+/// production entry point goes through [`sign_multihop_directory`], checked.
+/// Exists so a test can mint an authentically-signed envelope carrying a
+/// malformed pin, to prove the VERIFIER independently fails closed rather
+/// than relying solely on the signer's own gate.
+#[allow(clippy::too_many_arguments)]
+fn sign_multihop_directory_unchecked(
     nodes: Vec<NodeEntry>,
     server_key: &SigningKey,
     operational_pubkey: &VerifyingKey,
@@ -386,6 +453,12 @@ pub fn verify_multihop_directory_any(
             got: signed.version,
         });
     }
+
+    // Fail-closed structural check, same position as the TS verifier's
+    // per-node `validateNode` (before any signature verification): an
+    // untrusted directory with a malformed edge-cert pin is rejected outright
+    // rather than accepted here and only caught by the TS sibling.
+    check_edge_cert_pins(&signed.nodes)?;
 
     // (1) server pubkey pin
     if !envelope::pin_allows(expected_server_pubkeys, &signed.server_pubkey_hex) {
@@ -521,6 +594,8 @@ impl MultiHopDirectoryDraft {
 /// # Errors
 /// - [`DirectoryError::InvalidHex`] / [`DirectoryError::PubkeyNotOnCurve`]
 ///   if the draft's operational pubkey or certificate hex is malformed.
+/// - [`DirectoryError::MalformedEdgeCertPin`] if any node's
+///   `edge_cert_sha256` is `Some` but not a well-formed 64-char hex pin.
 pub fn sign_directory_draft(
     draft: &MultiHopDirectoryDraft,
     server_key: &SigningKey,
@@ -532,7 +607,7 @@ pub fn sign_directory_draft(
         .map_err(|_| DirectoryError::InvalidHex)?
         .try_into()
         .map_err(|_| DirectoryError::InvalidHex)?;
-    Ok(sign_multihop_directory(
+    sign_multihop_directory(
         draft.nodes.clone(),
         server_key,
         &operational_pubkey,
@@ -540,7 +615,7 @@ pub fn sign_directory_draft(
         draft.generation,
         signed_at,
         expires_at,
-    ))
+    )
 }
 
 /// Censorship-minimization: returns a copy of `nodes` with every
@@ -805,7 +880,8 @@ pub mod test_helpers {
             generation,
             signed_at,
             expires_at,
-        );
+        )
+        .expect("fixture nodes never carry a malformed edge-cert pin");
         serde_json::to_string(&signed).expect("serialize minted directory")
     }
 }
@@ -918,6 +994,7 @@ mod tests {
             1_000,
             1_000 + 21_600,
         )
+        .expect("test nodes never carry a malformed edge-cert pin")
     }
 
     fn hexk(k: &SigningKey) -> String {
@@ -1156,7 +1233,8 @@ mod tests {
             9,
             2_000,
             2_000 + 21_600,
-        );
+        )
+        .expect("test nodes never carry a malformed edge-cert pin");
         let json = serde_json::to_string(&signed).unwrap();
         // In a dual-role node the exit endpoint equals the relay endpoint;
         // after redaction the address appears exactly once (the relay's),
@@ -1340,6 +1418,55 @@ mod tests {
             v.entries()[0].edge_cert_sha256.as_deref(),
             Some(pin.as_str())
         );
+    }
+
+    #[test]
+    fn malformed_edge_cert_pin_is_rejected_by_verify() {
+        // A 63-char pin (one hex char short of the SHA-256 length) must be
+        // rejected, mirroring the TS verifier's `asFixedHex` length check.
+        // Minted via the unchecked sign helper so the envelope is
+        // authentically signed over the bad pin: this proves
+        // `verify_multihop_directory_any` itself fails closed, not merely
+        // that `sign_multihop_directory` refuses to produce one.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        node.edge_cert_sha256 = Some("a".repeat(63));
+        let cert = warrenguard_multihop::sign_operational_cert(&root, &op.verifying_key());
+        let signed = sign_multihop_directory_unchecked(
+            vec![node],
+            &server,
+            &op.verifying_key(),
+            &cert,
+            7,
+            1_000,
+            1_000 + 21_600,
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let err = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect_err("a 63-char edge cert pin must be rejected");
+        assert!(matches!(err, DirectoryError::MalformedEdgeCertPin { .. }));
+    }
+
+    #[test]
+    fn sign_multihop_directory_refuses_a_malformed_edge_cert_pin() {
+        // Defense in depth: the shared signing entry point must never mint a
+        // directory that `verify_multihop_directory_any` (or the TS sibling)
+        // would reject, even if a malformed pin reached it from upstream.
+        let (op, server) = (key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        node.edge_cert_sha256 = Some("not-hex-and-too-short".to_owned());
+        let cert = [0u8; 64];
+        let err = sign_multihop_directory(
+            vec![node],
+            &server,
+            &op.verifying_key(),
+            &cert,
+            7,
+            1_000,
+            1_000 + 21_600,
+        )
+        .expect_err("a malformed pin must be refused at sign time");
+        assert!(matches!(err, DirectoryError::MalformedEdgeCertPin { .. }));
     }
 
     #[test]
