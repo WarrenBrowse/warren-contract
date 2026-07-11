@@ -2171,6 +2171,36 @@ pub struct AdminWithdrawalsResponse {
     pub total: u64,
 }
 
+/// Optional request body for `POST /v1/admin/withdrawals/{id}/refund`.
+///
+/// An empty (or absent) body keeps the historical behavior: the server
+/// enforces the 14-day withdrawal window (plus a 2-day grace for the
+/// day-truncated declaration date) against the payment's Stripe creation
+/// time and 422s with [`AdminWithdrawalOutOfWindow`] when exceeded.
+/// `override:true` is the operator's explicit decision to refund anyway;
+/// warren-admin records it under a distinct audit action.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminWithdrawalRefundBody {
+    /// `true` to refund even when the request was filed outside the
+    /// 14-day withdrawal window. Defaults to `false` (window enforced).
+    #[serde(rename = "override", default)]
+    pub override_window: bool,
+}
+
+/// 422 body for `POST /v1/admin/withdrawals/{id}/refund` when the request
+/// was filed outside the 14-day withdrawal window (plus grace) and no
+/// override was supplied. Machine-read by warren-admin to offer the
+/// clearly-labeled "Refund anyway" secondary action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWithdrawalOutOfWindow {
+    /// Always `"out_of_window"`. Discriminates this 422 from a Stripe
+    /// refund rejection (which carries a different `error` string).
+    pub error: String,
+    /// Days elapsed between the payment's Stripe creation time and the
+    /// withdrawal declaration (rounded up).
+    pub payment_age_days: u64,
+}
+
 /// Response for the admin process endpoints
 /// (`POST /v1/admin/withdrawals/{id}/refund` and `.../reject`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2189,6 +2219,12 @@ pub struct AdminWithdrawalProcessResponse {
     /// did not apply. Defaults to `false` for responses from older servers.
     #[serde(default)]
     pub access_revoked: bool,
+    /// `true` when the refund proceeded without the payment-age check
+    /// because the Stripe age lookup failed (fail-open: the legal duty is
+    /// refunding in time). The operator should verify the window manually
+    /// in the Stripe dashboard. Defaults to `false` for older servers.
+    #[serde(default)]
+    pub age_unverified: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2738,6 +2774,64 @@ mod tests {
         assert_eq!(json, r#"{"expires_at":1700000000}"#);
         let parsed: MobilePaymentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn withdrawal_refund_body_override_defaults_false_and_uses_wire_name() {
+        // The admin refund POST historically has an empty body: `{}` (and an
+        // absent field) must keep override off so old callers never bypass
+        // the 14-day window check.
+        let empty: AdminWithdrawalRefundBody =
+            serde_json::from_str("{}").expect("empty object must parse");
+        assert!(
+            !empty.override_window,
+            "absent override must default to false"
+        );
+
+        let on: AdminWithdrawalRefundBody = serde_json::from_str(r#"{"override":true}"#)
+            .expect("override body must parse under the wire name");
+        assert!(on.override_window, "explicit override:true must round-trip");
+
+        let json = serde_json::to_string(&on).expect("serialize");
+        assert_eq!(
+            json, r#"{"override":true}"#,
+            "the wire field must be named `override`"
+        );
+    }
+
+    #[test]
+    fn withdrawal_out_of_window_error_pins_wire_shape() {
+        let err = AdminWithdrawalOutOfWindow {
+            error: "out_of_window".to_owned(),
+            payment_age_days: 17,
+        };
+        let json = serde_json::to_string(&err).expect("serialize");
+        assert_eq!(
+            json, r#"{"error":"out_of_window","payment_age_days":17}"#,
+            "the 422 body is machine-read by warren-admin; its shape is frozen"
+        );
+        let parsed: AdminWithdrawalOutOfWindow = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed.payment_age_days, 17);
+        assert_eq!(parsed.error, "out_of_window");
+    }
+
+    #[test]
+    fn withdrawal_process_response_age_unverified_defaults_false_on_legacy_json() {
+        // Additive-field compat: a response from an older warren-api without
+        // `age_unverified` must still parse, with the flag off.
+        let legacy = r#"{"id":"ref1","status":"refunded","stripe_refund_id":"re_1"}"#;
+        let parsed: AdminWithdrawalProcessResponse =
+            serde_json::from_str(legacy).expect("legacy JSON without age_unverified must parse");
+        assert!(
+            !parsed.age_unverified,
+            "absent age_unverified must default to false"
+        );
+
+        let with_field =
+            r#"{"id":"ref1","status":"refunded","stripe_refund_id":"re_1","age_unverified":true}"#;
+        let parsed: AdminWithdrawalProcessResponse =
+            serde_json::from_str(with_field).expect("new JSON must parse");
+        assert!(parsed.age_unverified, "explicit true must round-trip");
     }
 
     #[test]
