@@ -858,6 +858,7 @@ pub mod test_helpers {
             cover_domain: None,
             signature: exit_sig,
             dns_disabled: false,
+            exit_mlkem768_pubkey: None,
         };
         let attestation = sign_node_attestation(op, &relay_id, &relay_ed, asn, country);
         NodeEntry {
@@ -976,6 +977,7 @@ mod tests {
             cover_domain: None,
             signature: exit_sig,
             dns_disabled: false,
+            exit_mlkem768_pubkey: None,
         };
 
         let attestation =
