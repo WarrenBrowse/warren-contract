@@ -1773,4 +1773,19 @@ mod tests {
         println!("EDGE_GOLDEN_SERVER={}", hexk(&server));
         println!("EDGE_GOLDEN_ROOT={}", hexk(&root));
     }
+
+    #[test]
+    #[ignore = "generator: prints the cross-impl golden replayed by warren-sdk-ts"]
+    fn print_pq_descriptor_golden_for_ts_crossimpl() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![pq_signed_node(&op, 1, "fr", 24940, false)],
+        );
+        println!("PQ_GOLDEN_JSON={}", serde_json::to_string(&signed).unwrap());
+        println!("PQ_GOLDEN_SERVER={}", hexk(&server));
+        println!("PQ_GOLDEN_ROOT={}", hexk(&root));
+    }
 }
