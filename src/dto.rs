@@ -813,6 +813,15 @@ pub struct RegisterExitRequest {
     /// (the node then appears single-hop only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_x25519_multihop_pubkey_hex: Option<String>,
+    /// 2368-char hex of the exit's ML-KEM-768 encapsulation key (1184
+    /// bytes), the post-quantum half of the X-Wing hybrid seal. Derived
+    /// from the same Ed25519 identity as the X25519 multihop key, so the
+    /// two rotate together. Published so the offline signer can mint
+    /// PQ-bound exit descriptors (signed under the PQ PKI context) and
+    /// PQ-capable clients can negotiate the `/v2` datapath. Absent from
+    /// an exit built without the `pq-hpke` feature (classical-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_mlkem768_pubkey_hex: Option<String>,
     /// Build identifier of the running exit binary (e.g.
     /// `v0.3.7` or `v0.3.7-2-gabc1234`), surfaced in the admin panel
     /// so the operator can verify fleet deployment state at a glance.
@@ -1292,6 +1301,13 @@ pub struct AdminExitRow {
     /// multi-hop exit descriptors. `None` for legacy single-hop exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_x25519_multihop_pubkey_hex: Option<String>,
+    /// 2368-char hex of the exit's ML-KEM-768 encapsulation key (X-Wing
+    /// post-quantum half), if the exit published one on heartbeat.
+    /// Consumed by the offline `wapi admin-publish-multihop-directory`
+    /// tool to mint PQ-bound exit descriptors. `None` for classical-only
+    /// exits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_mlkem768_pubkey_hex: Option<String>,
     /// Build identifier the exit advertised on its last heartbeat
     /// (e.g. `v0.3.7-2-gabc1234`). `None` for legacy exit binaries
     /// that pre-date version reporting.
@@ -3220,6 +3236,7 @@ mod tests {
             active: true,
             exit_id: None,
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: None,
             active_sessions: None,
             cover_domain: None,
@@ -3263,6 +3280,7 @@ mod tests {
             active: true,
             exit_id: Some(ExitId::from_bytes([0xa1; 16])),
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: None,
             active_sessions: None,
             cover_domain: None,
@@ -3306,6 +3324,7 @@ mod tests {
             active: true,
             exit_id: None,
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: None,
             active_sessions: None,
             cover_domain: None,
@@ -3343,6 +3362,7 @@ mod tests {
             active: true,
             exit_id: None,
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: Some("v0.3.7-2-gabc1234".to_owned()),
             active_sessions: None,
             cover_domain: None,
@@ -3384,6 +3404,7 @@ mod tests {
             active: true,
             exit_id: None,
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: None,
             active_sessions: None,
             cover_domain: None,
@@ -3434,6 +3455,7 @@ mod tests {
             active: true,
             exit_id: None,
             exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: None,
             version: None,
             active_sessions: None,
             cover_domain: None,
@@ -3467,6 +3489,93 @@ mod tests {
         assert!(
             parsed.port_forward.is_none(),
             "legacy heartbeat without port_forward must decode to None (unknown)"
+        );
+    }
+
+    #[test]
+    fn register_exit_request_mlkem768_pubkey_hex_round_trips_and_omits_when_absent() {
+        // Post-quantum: the exit publishes its ML-KEM-768 encapsulation key
+        // (the X-Wing PQ half, 1184 bytes hex-encoded) on the heartbeat so
+        // warren-api can store it and the offline signer can mint PQ-bound
+        // exit descriptors. Some(ek) must survive the wire round-trip, a
+        // legacy heartbeat must decode to None, and None stays off the wire.
+        let ek_hex = "ab".repeat(1184);
+        let req = RegisterExitRequest {
+            telemetry: None,
+            endpoints: sample_endpoints(),
+            country: CountryCode::try_from("FR").unwrap(),
+            city: "Paris".to_owned(),
+            weight: 100,
+            active: true,
+            exit_id: None,
+            exit_x25519_multihop_pubkey_hex: None,
+            exit_mlkem768_pubkey_hex: Some(ek_hex.clone()),
+            version: None,
+            active_sessions: None,
+            cover_domain: None,
+            update_status: None,
+            hwqual: None,
+            edge_cert_sha256_hex: None,
+            port_forward: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.exit_mlkem768_pubkey_hex.as_deref(),
+            Some(ek_hex.as_str()),
+            "exit_mlkem768_pubkey_hex must survive the wire round-trip"
+        );
+
+        let legacy = r#"{"endpoints":[{"addr":"198.51.100.1","family":"ipv4","ingress":true,"egress":true,"listeners":[{"port":51820,"transport":"quic","alpn":"h3"}]}],"country":"FR","city":"Paris","weight":100,"active":true}"#;
+        let parsed: RegisterExitRequest = serde_json::from_str(legacy).unwrap();
+        assert!(
+            parsed.exit_mlkem768_pubkey_hex.is_none(),
+            "legacy heartbeat without exit_mlkem768_pubkey_hex must decode to None"
+        );
+
+        let none_req = RegisterExitRequest {
+            exit_mlkem768_pubkey_hex: None,
+            ..req
+        };
+        let json = serde_json::to_string(&none_req).unwrap();
+        assert!(
+            !json.contains("exit_mlkem768_pubkey_hex"),
+            "None exit_mlkem768_pubkey_hex must NOT appear on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn admin_exit_row_mlkem768_pubkey_hex_round_trips_and_tolerates_absence() {
+        // The offline signer (wapi admin-publish-multihop-directory) reads the
+        // exit's ML-KEM-768 key from the admin exit row to mint PQ-bound
+        // descriptors. The field must round-trip, and a row emitted by a
+        // pre-PQ server must decode to None.
+        let pubkey_ss58 = crate::ss58::encode(&[0xbb; 32]);
+        let ek_hex = "cd".repeat(1184);
+        let raw = format!(
+            r#"{{"pubkey_ss58":"{pubkey_ss58}","exit_id":"123456789abcdef01122334455667788","ip_addrs":["198.51.100.1:51820"],"country":"FR","city":"Paris","weight":100,"active":true,"last_seen":1700000000,"seconds_since_last_seen":42,"exit_mlkem768_pubkey_hex":"{ek_hex}"}}"#
+        );
+        let parsed: AdminExitRow = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed.exit_mlkem768_pubkey_hex.as_deref(),
+            Some(ek_hex.as_str()),
+            "exit_mlkem768_pubkey_hex must reach the signer through the admin row"
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        let round: AdminExitRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            round.exit_mlkem768_pubkey_hex.as_deref(),
+            Some(ek_hex.as_str()),
+            "exit_mlkem768_pubkey_hex must survive the admin-row round-trip"
+        );
+
+        let legacy = format!(
+            r#"{{"pubkey_ss58":"{pubkey_ss58}","exit_id":"123456789abcdef01122334455667788","ip_addrs":["198.51.100.1:51820"],"country":"FR","city":"Paris","weight":100,"active":true,"last_seen":1700000000,"seconds_since_last_seen":42}}"#
+        );
+        let parsed: AdminExitRow = serde_json::from_str(&legacy).unwrap();
+        assert!(
+            parsed.exit_mlkem768_pubkey_hex.is_none(),
+            "row emitted by a pre-PQ server must decode with exit_mlkem768_pubkey_hex=None"
         );
     }
 
