@@ -56,7 +56,7 @@
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use warrenguard_multihop::{
-    ExitDescAttestation, ExitDescriptorSigned, RelayDescriptorSigned,
+    ExitDescAttestation, ExitDescriptorSigned, RelayDescriptorSigned, verify_exit_descriptor_pq,
     verify_exit_descriptor_with_dns_attestation, verify_node_attestation, verify_operational_cert,
     verify_relay_descriptor,
 };
@@ -667,14 +667,21 @@ fn node_fully_vouched(operational_pubkey: &VerifyingKey, node: &NodeEntry) -> bo
     if verify_relay_descriptor(operational_pubkey, &node.relay).is_err() {
         return false;
     }
-    // Multi-hop client policy (engine spec): reject an exit that advertises
-    // `dns_disabled = true` but is only `/v1`-signed (the bit is unattested), a
-    // downgrade-attack suspect that could silently disable in-tunnel DNS. An
-    // attested exit, or an unattested exit with DNS enabled, is kept.
-    match verify_exit_descriptor_with_dns_attestation(operational_pubkey, &node.exit) {
-        Err(_) => return false,
-        Ok(ExitDescAttestation::Unattested) if node.exit.dns_disabled => return false,
-        Ok(_) => {}
+    // PQ first, then the classical contexts (mirrors the relay's
+    // `verify_descriptor_any_version` so a pool can mix `/v1`, `/v2` and PQ
+    // descriptors during a rolling fleet upgrade). The PQ context binds both
+    // the ML-KEM key and the dns bit, so a PQ-verified exit needs no further
+    // dns-attestation policy.
+    if verify_exit_descriptor_pq(operational_pubkey, &node.exit).is_err() {
+        // Multi-hop client policy (engine spec): reject an exit that advertises
+        // `dns_disabled = true` but is only `/v1`-signed (the bit is unattested), a
+        // downgrade-attack suspect that could silently disable in-tunnel DNS. An
+        // attested exit, or an unattested exit with DNS enabled, is kept.
+        match verify_exit_descriptor_with_dns_attestation(operational_pubkey, &node.exit) {
+            Err(_) => return false,
+            Ok(ExitDescAttestation::Unattested) if node.exit.dns_disabled => return false,
+            Ok(_) => {}
+        }
     }
     let Ok(att_bytes) = hex::decode(&node.attestation_hex) else {
         return false;
@@ -723,6 +730,11 @@ pub struct VerifiedExit {
     /// if it advertises an edge. After [`VerifiedExit::via_entry`] this is the
     /// ENTRY's edge cert (the WebTransport the browser actually connects to).
     pub edge_cert_sha256: Option<String>,
+    /// The exit's ML-KEM-768 recipient key (the X-Wing hybrid-seal half),
+    /// present ONLY when the PQ operational signature bound it. A key a
+    /// classical signature merely transported stays `None`: surfacing an
+    /// unbound key would hand the dial layer downgrade-forgeable PQ material.
+    pub exit_mlkem768_pubkey: Option<Vec<u8>>,
 }
 
 /// A trusted node projected as an **entry** hop (blind QUIC forwarder). Same
@@ -814,6 +826,12 @@ impl VerifiedMultiHopDirectory {
                 dns_disabled: n.exit.dns_disabled,
                 cover_domain: n.relay.cover_domain.clone(),
                 edge_cert_sha256: n.edge_cert_sha256.clone(),
+                // Re-checked at the surfacing point so the anti-downgrade
+                // invariant holds locally, independent of the vouching policy.
+                exit_mlkem768_pubkey: verify_exit_descriptor_pq(&self.operational_pubkey, &n.exit)
+                    .is_ok()
+                    .then(|| n.exit.exit_mlkem768_pubkey.clone())
+                    .flatten(),
             })
             .collect()
     }
@@ -908,7 +926,8 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use warrenguard_multihop::{
-        ExitId, exit_descriptor_signing_payload, relay_descriptor_signing_payload,
+        ExitId, MLKEM768_ENCAPS_KEY_LEN, exit_descriptor_signing_payload,
+        exit_descriptor_signing_payload_pq, relay_descriptor_signing_payload,
     };
 
     use super::*;
@@ -995,6 +1014,36 @@ mod tests {
         }
     }
 
+    fn dummy_mlkem_ek() -> Vec<u8> {
+        (0..MLKEM768_ENCAPS_KEY_LEN)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    /// Re-signs `signed_node`'s exit descriptor under the PQ context, binding
+    /// the ML-KEM key and the dns bit under the operational signature.
+    fn pq_signed_node(
+        op: &SigningKey,
+        tag: u8,
+        country: &str,
+        asn: u32,
+        dns_disabled: bool,
+    ) -> NodeEntry {
+        let mut node = signed_node(op, tag, country, asn);
+        let ek = dummy_mlkem_ek();
+        node.exit.dns_disabled = dns_disabled;
+        node.exit.exit_mlkem768_pubkey = Some(ek.clone());
+        node.exit.signature = op
+            .sign(&exit_descriptor_signing_payload_pq(
+                node.exit.exit_id,
+                &node.exit.exit_x25519_multihop_pubkey,
+                dns_disabled,
+                &ek,
+            ))
+            .to_bytes();
+        node
+    }
+
     fn build(
         root: &SigningKey,
         op: &SigningKey,
@@ -1036,6 +1085,187 @@ mod tests {
         assert_eq!(v.operational_pubkey, op.verifying_key());
         assert!(!v.is_expired(1_500));
         assert!(v.is_expired(1_000 + 21_600));
+    }
+
+    #[test]
+    fn pq_signed_descriptor_is_vouched_alongside_classical() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let nodes = vec![
+            pq_signed_node(&op, 1, "fr", 1, false),
+            signed_node(&op, 2, "de", 2),
+        ];
+        let signed = build(&root, &op, &server, nodes);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("a directory mixing PQ and classical descriptors verifies");
+        assert_eq!(
+            v.nodes.len(),
+            2,
+            "the PQ-signed node must be vouched alongside the classical one"
+        );
+        assert_eq!(v.dropped, 0);
+    }
+
+    #[test]
+    fn pq_signed_descriptor_with_attested_dns_disabled_is_kept() {
+        // The PQ payload covers the dns bit, so unlike the unattested `/v1`
+        // case a PQ-signed `dns_disabled = true` is trustworthy, not a
+        // downgrade suspect.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![pq_signed_node(&op, 1, "fr", 1, true)],
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        assert_eq!(v.nodes.len(), 1);
+        assert!(v.exits()[0].dns_disabled, "the attested bit flows through");
+    }
+
+    #[test]
+    fn pq_descriptor_with_wrong_length_mlkem_key_is_dropped() {
+        // Honestly signed over a 100-byte key: the length gate must reject it
+        // before any signature question, and no classical context can rescue a
+        // PQ-context signature.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        let short_ek = vec![0xAB; 100];
+        node.exit.exit_mlkem768_pubkey = Some(short_ek.clone());
+        node.exit.signature = op
+            .sign(&exit_descriptor_signing_payload_pq(
+                node.exit.exit_id,
+                &node.exit.exit_x25519_multihop_pubkey,
+                false,
+                &short_ek,
+            ))
+            .to_bytes();
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("envelope verifies; the malformed node is dropped");
+        assert_eq!(v.nodes.len(), 0);
+        assert_eq!(v.dropped, 1);
+    }
+
+    #[test]
+    fn pq_descriptor_with_tampered_mlkem_key_is_dropped() {
+        // Flipped before the envelope is minted, so the envelope verifies and
+        // the drop is provably the descriptor signature check.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = pq_signed_node(&op, 1, "fr", 1, false);
+        node.exit
+            .exit_mlkem768_pubkey
+            .as_mut()
+            .expect("pq node carries a key")[0] ^= 0x01;
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("envelope verifies; the tampered node is dropped");
+        assert_eq!(v.nodes.len(), 0);
+        assert_eq!(v.dropped, 1);
+    }
+
+    #[test]
+    fn pq_descriptor_with_stripped_mlkem_key_is_dropped() {
+        // Stripping the key from a PQ-signed descriptor invalidates every
+        // context (the PQ signature never verifies as `/v1` or `/v2`), so the
+        // downgrade is refused rather than silently going classical.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = pq_signed_node(&op, 1, "fr", 1, false);
+        node.exit.exit_mlkem768_pubkey = None;
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("envelope verifies; the stripped node is dropped");
+        assert_eq!(v.nodes.len(), 0);
+        assert_eq!(v.dropped, 1);
+    }
+
+    #[test]
+    fn exits_surface_the_mlkem_key_only_when_pq_attested() {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![
+                pq_signed_node(&op, 1, "fr", 1, false),
+                signed_node(&op, 2, "de", 2),
+            ],
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        let exits = v.exits();
+        let pq = exits.iter().find(|e| e.country == "fr").expect("pq exit");
+        let classical = exits
+            .iter()
+            .find(|e| e.country == "de")
+            .expect("classical exit");
+        assert_eq!(
+            pq.exit_mlkem768_pubkey.as_deref(),
+            Some(dummy_mlkem_ek().as_slice()),
+            "the PQ-attested key reaches the dial view"
+        );
+        assert!(classical.exit_mlkem768_pubkey.is_none());
+    }
+
+    #[test]
+    fn unbound_mlkem_key_on_a_classical_descriptor_is_never_surfaced() {
+        // Anti-downgrade invariant: only the PQ signature vouches the key. A
+        // classical `/v1` descriptor with a key merely attached (outside its
+        // signature) still verifies classically, so the node is kept, but the
+        // unbound key must never surface as usable PQ material.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        node.exit.exit_mlkem768_pubkey = Some(dummy_mlkem_ek());
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        assert_eq!(
+            v.nodes.len(),
+            1,
+            "the node itself stays classically vouched"
+        );
+        assert!(v.exits()[0].exit_mlkem768_pubkey.is_none());
+    }
+
+    #[test]
+    fn via_entry_keeps_the_exit_mlkem_key() {
+        // The circuit view hands the dial layer the ENTRY's transport identity
+        // but the EXIT's sealed-frame material; the ML-KEM key is seal
+        // material and must survive the projection.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(
+            &root,
+            &op,
+            &server,
+            vec![
+                pq_signed_node(&op, 1, "fr", 1, false),
+                signed_node(&op, 2, "de", 2),
+            ],
+        );
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        let exits = v.exits();
+        let exit = exits.iter().find(|e| e.country == "fr").expect("fr exit");
+        let entries = v.entries();
+        let entry = entries
+            .iter()
+            .find(|e| e.country == "de")
+            .expect("de entry");
+        let dialed = exit
+            .via_entry(entry)
+            .expect("distinct nodes form a circuit");
+        assert_eq!(
+            dialed.exit_mlkem768_pubkey.as_deref(),
+            Some(dummy_mlkem_ek().as_slice())
+        );
     }
 
     #[test]
