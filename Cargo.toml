@@ -18,8 +18,8 @@ members = ["warren-discovery"]
 # a consumer's [patch] does not apply to path-sourced deps). Local dev and CI
 # override these with the sibling `../warrenguard` via the `[patch]` at the foot
 # of this file. Keep the rev in lockstep with `.warrenguard-version`.
-warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "d8b13fb17cf226341e0ef356cf2defb363d0bc63" }
-warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "d8b13fb17cf226341e0ef356cf2defb363d0bc63" }
+warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "34c19e0ff1dbe531a1acc9d12c768fcf6bcd6274" }
+warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "34c19e0ff1dbe531a1acc9d12c768fcf6bcd6274" }
 
 # Lints applied to every crate in the workspace via `[lints] workspace = true`.
 # Mirrors warren-sdk-rs / warren-core policy: zero unsafe, deny correctness,
