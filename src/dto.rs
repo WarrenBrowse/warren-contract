@@ -156,6 +156,12 @@ pub enum Currency {
     GBP,
     /// Swiss franc (ISO 4217), smallest unit: rappen.
     CHF,
+    /// Polkadot, denominated in whole DOT. Smallest unit is the planck
+    /// (10 decimals: `1 DOT = 10^10 planck`).
+    DOT,
+    /// Solana, denominated in whole SOL. Smallest unit is the lamport
+    /// (9 decimals: `1 SOL = 10^9 lamport`).
+    SOL,
 }
 
 impl Currency {
@@ -172,6 +178,8 @@ impl Currency {
             Self::CAD => "CAD",
             Self::GBP => "GBP",
             Self::CHF => "CHF",
+            Self::DOT => "DOT",
+            Self::SOL => "SOL",
         }
     }
 }
@@ -338,6 +346,12 @@ pub enum PaymentMethod {
     GooglePlay,
     /// PayPal (processed through Stripe).
     Paypal,
+    /// Polkadot (DOT), self-hosted watcher against a third-party RPC
+    /// (doc 91 SS3.3/SS3.5: never a self-hosted node, no privacy gain).
+    Polkadot,
+    /// Solana (SOL) via Solana Pay, self-hosted watcher against a
+    /// third-party RPC (doc 91 SS3.4/SS3.5: same reasoning as Polkadot).
+    Solana,
 }
 
 impl PaymentMethod {
@@ -359,6 +373,8 @@ impl PaymentMethod {
             "appstore" => Ok(Self::AppStore),
             "googleplay" => Ok(Self::GooglePlay),
             "paypal" => Ok(Self::Paypal),
+            "polkadot" => Ok(Self::Polkadot),
+            "solana" => Ok(Self::Solana),
             other => Err(ValidationError::InvalidPaymentMethod(crate::redact(other))),
         }
     }
@@ -376,6 +392,8 @@ impl PaymentMethod {
             Self::AppStore => "appstore",
             Self::GooglePlay => "googleplay",
             Self::Paypal => "paypal",
+            Self::Polkadot => "polkadot",
+            Self::Solana => "solana",
         }
     }
 }
@@ -2722,6 +2740,8 @@ mod tests {
             (PaymentMethod::AppStore, "\"appstore\""),
             (PaymentMethod::GooglePlay, "\"googleplay\""),
             (PaymentMethod::Paypal, "\"paypal\""),
+            (PaymentMethod::Polkadot, "\"polkadot\""),
+            (PaymentMethod::Solana, "\"solana\""),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(
@@ -2743,6 +2763,8 @@ mod tests {
             ("\"appstore\"", PaymentMethod::AppStore),
             ("\"googleplay\"", PaymentMethod::GooglePlay),
             ("\"paypal\"", PaymentMethod::Paypal),
+            ("\"polkadot\"", PaymentMethod::Polkadot),
+            ("\"solana\"", PaymentMethod::Solana),
         ] {
             let pm: PaymentMethod = serde_json::from_str(wire).expect("deserialize");
             assert_eq!(pm, expected, "wire {wire:?} must parse to {expected:?}");
@@ -2773,6 +2795,8 @@ mod tests {
             PaymentMethod::AppStore,
             PaymentMethod::GooglePlay,
             PaymentMethod::Paypal,
+            PaymentMethod::Polkadot,
+            PaymentMethod::Solana,
         ] {
             let parsed = PaymentMethod::from_wire(v.as_wire()).expect("round-trip");
             assert_eq!(parsed, v);
@@ -3694,6 +3718,8 @@ mod tests {
             (Currency::CAD, "\"CAD\""),
             (Currency::GBP, "\"GBP\""),
             (Currency::CHF, "\"CHF\""),
+            (Currency::DOT, "\"DOT\""),
+            (Currency::SOL, "\"SOL\""),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, expected, "variant {variant:?} wire form");
