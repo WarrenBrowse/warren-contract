@@ -726,6 +726,13 @@ pub struct VerifiedExit {
     pub dns_disabled: bool,
     /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
     pub cover_domain: Option<String>,
+    /// The dialed hop advertises the TLS-over-TCP anti-censorship carrier
+    /// (roster v10): a UDP-blocked dial may be retried over `:443/tcp` under the
+    /// `cover_domain` SNI. After [`VerifiedExit::via_entry`] this is the ENTRY's
+    /// flag (the hop the client actually dials), mirroring `cover_domain`. The
+    /// transport arms the UDP->TCP fallback race only when this is set AND a
+    /// `cover_domain` is present.
+    pub tcp_fallback: bool,
     /// SHA-256 hex of the dialed hop's EdgeConnect cert for browser pinning,
     /// if it advertises an edge. After [`VerifiedExit::via_entry`] this is the
     /// ENTRY's edge cert (the WebTransport the browser actually connects to).
@@ -755,6 +762,10 @@ pub struct VerifiedEntry {
     pub weight: u64,
     /// X.509 cover-domain SNI from the relay descriptor (ADR-0004), if any.
     pub cover_domain: Option<String>,
+    /// The entry hop advertises the TLS-over-TCP anti-censorship carrier
+    /// (roster v10): a UDP-blocked dial to this hop may be retried over
+    /// `:443/tcp` under the `cover_domain` SNI.
+    pub tcp_fallback: bool,
     /// SHA-256 hex of this entry hop's EdgeConnect cert for browser pinning,
     /// if it advertises an edge; the pin for the WebTransport a browser dials.
     pub edge_cert_sha256: Option<String>,
@@ -784,6 +795,9 @@ impl VerifiedExit {
         Some(VerifiedExit {
             endpoint: entry.endpoint,
             cover_domain: entry.cover_domain.clone(),
+            // The carrier terminates at the hop the client dials, so this must be
+            // the ENTRY's flag, not the exit's `..self` value the spread carries.
+            tcp_fallback: entry.tcp_fallback,
             edge_cert_sha256: entry.edge_cert_sha256.clone(),
             exit_ed25519_pubkey: entry.relay_ed25519_pubkey,
             ..self.clone()
@@ -804,6 +818,7 @@ impl VerifiedMultiHopDirectory {
                 city: n.city.clone(),
                 weight: n.weight,
                 cover_domain: n.relay.cover_domain.clone(),
+                tcp_fallback: n.relay.tcp_fallback,
                 edge_cert_sha256: n.edge_cert_sha256.clone(),
                 exit_id: *n.exit.exit_id.as_bytes(),
             })
@@ -825,6 +840,7 @@ impl VerifiedMultiHopDirectory {
                 weight: n.weight,
                 dns_disabled: n.exit.dns_disabled,
                 cover_domain: n.relay.cover_domain.clone(),
+                tcp_fallback: n.relay.tcp_fallback,
                 edge_cert_sha256: n.edge_cert_sha256.clone(),
                 // Re-checked at the surfacing point so the anti-downgrade
                 // invariant holds locally, independent of the vouching policy.
@@ -1758,6 +1774,69 @@ mod tests {
             dialed.edge_cert_sha256,
             Some("22".repeat(32)),
             "circuit pins the entry's edge cert (the dialed WebTransport)"
+        );
+    }
+
+    #[test]
+    fn exits_and_entries_project_the_relay_carrier_capability() {
+        // roster v10: the dialed hop's `tcp_fallback` flag must survive the flat
+        // projection so the transport can arm the UDP->TCP carrier race. The flag
+        // rides the relay descriptor unsigned (the multi-hop signing payload is
+        // only relay_id + relay_ed), so setting it after `signed_node` is faithful
+        // to how warren-api overlays it on the additive wire.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut carrier = signed_node(&op, 1, "fr", 1);
+        carrier.relay.tcp_fallback = true;
+        let plain = signed_node(&op, 2, "de", 2);
+        let signed = build(&root, &op, &server, vec![carrier, plain]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+
+        let exit_on = v.exits().into_iter().find(|e| e.country == "fr").unwrap();
+        let exit_off = v.exits().into_iter().find(|e| e.country == "de").unwrap();
+        assert!(
+            exit_on.tcp_fallback,
+            "an advertised carrier must reach the exit dial view"
+        );
+        assert!(
+            !exit_off.tcp_fallback,
+            "a node without the carrier must project as unarmed"
+        );
+
+        let entry_on = v.entries().into_iter().find(|e| e.country == "fr").unwrap();
+        let entry_off = v.entries().into_iter().find(|e| e.country == "de").unwrap();
+        assert!(
+            entry_on.tcp_fallback,
+            "an advertised carrier must reach the entry dial view"
+        );
+        assert!(
+            !entry_off.tcp_fallback,
+            "a node without the carrier must project as unarmed"
+        );
+    }
+
+    #[test]
+    fn via_entry_takes_the_entry_carrier_capability_not_the_exit() {
+        // The carrier terminates at the hop the client dials (the ENTRY), so the
+        // circuit view must carry the entry's flag, never the exit node's own.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut exit_node = signed_node(&op, 1, "fr", 1);
+        exit_node.relay.tcp_fallback = true; // exit's own relay advertises it
+        let mut entry_node = signed_node(&op, 2, "de", 2);
+        entry_node.relay.tcp_fallback = false; // the dialed entry does not
+        let signed = build(&root, &op, &server, vec![exit_node, entry_node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let v = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+        let exit = v.exits().into_iter().find(|e| e.country == "fr").unwrap();
+        let entry = v.entries().into_iter().find(|e| e.country == "de").unwrap();
+        let dialed = exit
+            .via_entry(&entry)
+            .expect("two distinct nodes form a circuit");
+        assert!(
+            !dialed.tcp_fallback,
+            "the circuit must take the entry's carrier flag, not the exit's"
         );
     }
 
