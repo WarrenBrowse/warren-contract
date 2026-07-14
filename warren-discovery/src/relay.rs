@@ -489,6 +489,22 @@ impl WarrenRelay {
         self
     }
 
+    /// Stamps the node-level TLS-over-TCP fallback carrier capability (v10)
+    /// carried by the signed roster onto this node's single-hop dial target.
+    /// Only `Some(true)` arms the capability on the [`WarrenExitAddr`]; `None`
+    /// (legacy exit) or `Some(false)` leaves the exit dialed over UDP only, so a
+    /// blocked handshake is never pointlessly retried over TCP. Mirrors
+    /// [`with_cover_domain`](Self::with_cover_domain): the flag rides inside
+    /// `endpoint_addr`, so no `WarrenRelay`-level field or selector plumbing is
+    /// needed.
+    #[must_use]
+    pub fn with_tcp_fallback(mut self, tcp_fallback: Option<bool>) -> Self {
+        if tcp_fallback == Some(true) {
+            self.endpoint_addr = self.endpoint_addr.with_tcp_fallback();
+        }
+        self
+    }
+
     /// Ed25519 identity of the node (32-byte pubkey).
     #[must_use]
     pub fn id(&self) -> WarrenPubkey {

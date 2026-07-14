@@ -142,6 +142,7 @@ mod tests {
             }],
             cover_domain: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let msg = json_node_to_warren(node)
             .expect_err("malformed IP literal must be rejected")

@@ -93,7 +93,18 @@ use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 /// `skip_serializing_if` when absent) so nodes without it keep reproducing
 /// their pre-v9 canonical bytes. Signing-canonical like every prior bump:
 /// lockstep rollout of warren-api, warren-relay-selector and warren-app.
-pub const SIGNED_VERSION: u32 = 9;
+///
+/// **v10 (TCP-fallback carrier capability)** adds the optional per-node
+/// `tcp_fallback`: whether the exit terminates the TLS-over-TCP anti-censorship
+/// carrier on `:443/tcp`. The single-hop client reads it (stamped onto
+/// [`WarrenExitAddr::tcp_fallback`](warrenguard_wire::WarrenExitAddr)) to decide
+/// whether a UDP-handshake timeout against this exit is worth retrying over TCP.
+/// Appended last on [`JsonNode`] (additive, `skip_serializing_if` when absent)
+/// so nodes without it keep reproducing their pre-v10 canonical bytes.
+/// Signing-canonical like every prior bump: lockstep rollout of warren-api,
+/// warren-relay-selector, warren-app and every language SDK that replays
+/// `vectors/relays.json`.
+pub const SIGNED_VERSION: u32 = 10;
 
 /// **Wire** dial listener: a `port` plus the wire `transport` and the
 /// `alpn` token offered in the handshake. The app surfaces
@@ -170,10 +181,17 @@ pub struct JsonNode {
     /// the exit runs an enabled NAT-PMP gateway, `Some(false)` if explicitly
     /// disabled, `None` (skipped from the wire) if the exit binary pre-dates
     /// the flag. Warren is mono-IP, so this is a per-exit capability toggle,
-    /// not a second-IP announcement. Added in v9; must stay last to preserve
-    /// the canonical field order.
+    /// not a second-IP announcement. Added in v9.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_forward: Option<bool>,
+    /// Node-level TLS-over-TCP fallback carrier capability (v10): `Some(true)` if
+    /// the exit terminates the anti-censorship carrier on `:443/tcp`, `Some(false)`
+    /// if explicitly disabled, `None` (skipped from the wire) if the exit binary
+    /// pre-dates the flag. The single-hop client only retries a blocked UDP
+    /// handshake over TCP against an exit that advertises it. Added in v10; must
+    /// stay last to preserve the canonical field order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_fallback: Option<bool>,
 }
 
 /// **Signed** node list (full wire format, `relays.json` v9).
@@ -471,7 +489,8 @@ pub(crate) fn json_node_to_warren(n: JsonNode) -> Result<WarrenRelay, JsonError>
         n.egress.ipv6,
     )
     .with_cover_domain(n.cover_domain)
-    .with_port_forward(n.port_forward))
+    .with_port_forward(n.port_forward)
+    .with_tcp_fallback(n.tcp_fallback))
 }
 
 #[cfg(test)]
@@ -511,6 +530,7 @@ mod tests {
             }],
             cover_domain: None,
             port_forward: None,
+            tcp_fallback: None,
         }
     }
 
@@ -766,14 +786,14 @@ mod tests {
 
     #[test]
     fn signed_format_is_byte_stable_across_serializations() {
-        // Wire vector test: freeze the top-level field order for v9. Any
+        // Wire vector test: freeze the top-level field order for v10. Any
         // serde reordering invalidates every existing signature.
         let key = fixed_server_key();
         let signed = sign_relay_list(vec![], &key, 7, 42, 86442);
         let json = serde_json::to_string(&signed).expect("ser");
 
         let expected_field_order = [
-            r#""version":9"#,
+            r#""version":10"#,
             r#""nodes":[]"#,
             r#""generation":7"#,
             r#""signed_at":42"#,
@@ -791,26 +811,27 @@ mod tests {
     }
 
     #[test]
-    fn signed_version_is_pinned_at_9() {
+    fn signed_version_is_pinned_at_10() {
         // The client and every exit must agree on the signed relay-list wire
         // version. Bumping SIGNED_VERSION is a wire break: it needs a
         // coordinated exit redeploy plus updates to every consumer that pins the
         // number (warren-api `non_auth.rs`, the backend smoke script). Pinning it
         // here makes a silent bump impossible: change the number and this
         // dedicated test fails first, pointing straight at the contract.
-        assert_eq!(SIGNED_VERSION, 9);
+        assert_eq!(SIGNED_VERSION, 10);
     }
 
     #[test]
-    fn json_node_field_order_is_frozen_at_v9() {
+    fn json_node_field_order_is_frozen_at_v10() {
         // Wire vector test: freeze the JsonNode + JsonEndpoint +
         // JsonListener + JsonEgress + JsonLocation field order, including
-        // the v8 addition `cover_domain` and the v9 addition `port_forward`
-        // (which must serialize last). Any drift changes the canonical
-        // signing bytes for every entry.
+        // the v8 addition `cover_domain`, the v9 addition `port_forward`, and
+        // the v10 addition `tcp_fallback` (which must serialize last). Any drift
+        // changes the canonical signing bytes for every entry.
         let mut node = sample_node();
         node.cover_domain = Some("cover.example.com".to_owned());
         node.port_forward = Some(true);
+        node.tcp_fallback = Some(true);
         let json = serde_json::to_string(&node).expect("ser");
         let expected = [
             r#""id":"#,
@@ -832,6 +853,7 @@ mod tests {
             r#""alpn":"#,
             r#""cover_domain":"#,
             r#""port_forward":"#,
+            r#""tcp_fallback":"#,
         ];
         let mut last = 0usize;
         for needle in expected {
@@ -955,21 +977,23 @@ mod tests {
     }
 
     #[test]
-    fn golden_vector_v9_signed_relay_list_is_frozen() {
+    fn golden_vector_v10_signed_relay_list_is_frozen() {
         // Wire vector (rule 40): freeze today's exact signed bytes for a
-        // representative v9 list, including one node WITH cover_domain (v8) and
-        // port_forward (the v9 addition), produced from a deterministic key. If
-        // this drifts, deployed clients stop verifying lists from this build:
-        // bump SIGNED_VERSION instead of mutating the canonical shape.
+        // representative v10 list, including one node WITH cover_domain (v8),
+        // port_forward (v9) and tcp_fallback (the v10 addition), produced from a
+        // deterministic key. If this drifts, deployed clients stop verifying
+        // lists from this build: bump SIGNED_VERSION instead of mutating the
+        // canonical shape.
         let key = SigningKey::from_bytes(&[0x07; 32]);
         let mut node = sample_node();
         node.cover_domain = Some("cover.example.com".to_owned());
         node.port_forward = Some(true);
+        node.tcp_fallback = Some(true);
         let signed = sign_relay_list(vec![node], &key, 3, 1_700_000_000, 1_700_086_400);
         let json = serde_json::to_string(&signed).expect("serialize");
 
         let expected = concat!(
-            "{\"version\":9,",
+            "{\"version\":10,",
             "\"nodes\":[{\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\",",
             "\"exit_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
             "\"location\":{\"country\":\"FR\",\"city\":\"Paris\"},",
@@ -979,17 +1003,17 @@ mod tests {
             "\"endpoints\":[{\"addr\":\"127.0.0.1\",\"family\":\"ipv4\",",
             "\"listeners\":[{\"port\":443,\"transport\":\"quic\",\"alpn\":\"h3\"}]}],",
             "\"cover_domain\":\"cover.example.com\",",
-            "\"port_forward\":true}],",
+            "\"port_forward\":true,\"tcp_fallback\":true}],",
             "\"generation\":3,",
             "\"signed_at\":1700000000,",
             "\"expires_at\":1700086400,",
             "\"server_pubkey_hex\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\",",
-            "\"signature_hex\":\"e10105dd20d69c690fc687e81f6825179f3472fb8ce2d517804b847bf4650eef",
-            "bde3ad70075c1cbd8dbb08e1b9b2715cdc7d5f4c0014ea1ed248a6283903ae0d\"}",
+            "\"signature_hex\":\"981b68143e08de5bef8c235c4882c3d6b10f4da1dbba7dcca1d6f5cea32f15bd",
+            "ea6742610e0e18102499ab9cba3ce3a2090edec8a98e2ac3fa50d1b2567fca0f\"}",
         );
         assert_eq!(
             json, expected,
-            "signed relay-list v9 wire bytes drifted (wire break: bump SIGNED_VERSION)"
+            "signed relay-list v10 wire bytes drifted (wire break: bump SIGNED_VERSION)"
         );
 
         let pin = hex::encode(key.verifying_key().as_bytes());

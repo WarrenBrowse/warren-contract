@@ -861,6 +861,7 @@ pub mod test_helpers {
             relay_ed25519_pubkey: relay_ed,
             endpoint,
             cover_domain: None,
+            tcp_fallback: false,
             signature: relay_sig,
         };
         let exit_id = ExitId::from_bytes([tag; 16]);
@@ -980,6 +981,7 @@ mod tests {
             relay_ed25519_pubkey: relay_ed,
             endpoint,
             cover_domain: None,
+            tcp_fallback: false,
             signature: relay_sig,
         };
 
