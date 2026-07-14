@@ -1888,6 +1888,19 @@ pub struct AdminPendingVoucherRow {
     pub pending_id: String,
     /// Unix epoch of expiry.
     pub expires_at: u64,
+    /// Payment provider that minted the voucher (`"stripe"`, `"btcpay"`,
+    /// `"monero"`, `"solana"`, `"polkadot"`). `None` for rows recorded
+    /// before this metadata existed.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Currency token of the settling payment (`"EUR"`, `"SAT"`, `"XMR"`,
+    /// ...). `None` for pre-metadata rows.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Amount paid, in the smallest unit of `currency`. `None` for
+    /// pre-metadata rows.
+    #[serde(default)]
+    pub amount_units: Option<u64>,
 }
 
 /// Response for `GET /v1/admin/pending-vouchers`.
@@ -1897,6 +1910,90 @@ pub struct AdminPendingVouchersResponse {
     pub pending: Vec<AdminPendingVoucherRow>,
     /// Total count.
     pub total: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Admin: wpid support lookup.
+// ---------------------------------------------------------------------------
+
+/// Body for `POST /v1/admin/payments/wpid-lookup`.
+///
+/// A POST body rather than a query/path parameter: the wpid is a pull
+/// credential (whoever holds it can pull the unredeemed voucher within its
+/// TTL), and request bodies never land in proxy access logs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWpidLookupBody {
+    /// The payment correlation id the customer received at checkout.
+    pub wpid: String,
+}
+
+/// One invoice binding opened under the looked-up wpid.
+///
+/// Deliberately excludes the payment address / subaddress / reference: the
+/// support answer needs statuses and money math, never a key that would let
+/// an operator watch the customer's payment on-chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWpidInvoiceBindingRow {
+    /// Which rail opened the invoice: `"btcpay"`, `"monero"`, `"solana"`,
+    /// `"polkadot"`.
+    pub rail: String,
+    /// Unix expiry of the correlation binding, when the store tracks one.
+    pub expires_at_unix: Option<u64>,
+    /// Exact native amount quoted at invoice creation (piconero, lamport,
+    /// planck). `None` for rails priced at settlement (BTCPay).
+    pub locked_amount_native: Option<u64>,
+    /// Subscription duration locked at invoice creation, in seconds.
+    pub granted_duration_secs: Option<u64>,
+}
+
+/// Response for `POST /v1/admin/payments/wpid-lookup`: the support-facing
+/// lifecycle of one payment, aggregated across the correlation stores.
+/// Never carries the voucher secret nor any payment address.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWpidLookupResponse {
+    /// Invoice bindings still live for this wpid (empty once expired or
+    /// for a wpid that never opened an invoice).
+    pub bindings: Vec<AdminWpidInvoiceBindingRow>,
+    /// A payment settled and minted a voucher for this wpid.
+    pub settled: bool,
+    /// The voucher secret is still queued for pull (paid, not yet
+    /// retrieved by the customer, TTL not elapsed).
+    pub voucher_pull_pending: bool,
+    /// When `settled`: whether the minted voucher was already redeemed.
+    /// `None` when unknown (not settled, or the voucher row is gone).
+    pub voucher_redeemed: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Admin: payment node health.
+// ---------------------------------------------------------------------------
+
+/// Health of one payment dependency, as probed by warren-api.
+///
+/// `node` and `status` are lowercase snake-case tokens rather than enums so
+/// warren-api can add a watched dependency without a lockstep contract bump;
+/// consumers map unknown tokens to their own "unknown" rendering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPaymentNodeHealthRow {
+    /// Which dependency: `"btcpay"`, `"monerod"`, `"monero_wallet_rpc"`,
+    /// `"polkadot_rpc"`, `"solana_rpc"`.
+    pub node: String,
+    /// Verdict: `"healthy"`, `"degraded"`, `"down"` or `"unknown"`.
+    pub status: String,
+    /// One-line human summary. Carries no secret and no customer
+    /// identifier; probe target URLs are never echoed here (they can embed
+    /// RPC provider API keys).
+    pub detail: String,
+    /// Unix seconds of the probe when the node answered, `None` when it
+    /// was unreachable or never probed.
+    pub checked_at_unix: Option<u64>,
+}
+
+/// Response for `GET /v1/admin/payment-nodes/health`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminPaymentNodesHealthResponse {
+    /// One row per watched payment dependency.
+    pub nodes: Vec<AdminPaymentNodeHealthRow>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2123,13 +2220,31 @@ pub struct AdminLedgerRow {
     pub created_at: u64,
 }
 
+/// One per-(provider, currency) aggregate over the ledger entries matching
+/// the request's filter, computed before any `limit` truncation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminLedgerTotalRow {
+    /// Payment provider (e.g. `"stripe"`, `"btcpay"`, `"monero"`).
+    pub provider: String,
+    /// Currency as an uppercase ISO 4217 token (`"EUR"`, `"SAT"`, ...).
+    pub currency: String,
+    /// Number of matching entries.
+    pub count: u64,
+    /// Sum of `amount_minor` over the matching entries.
+    pub sum_minor: i64,
+}
+
 /// Response for `GET /v1/admin/ledger`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminLedgerResponse {
-    /// All ledger entries in insertion order.
+    /// Ledger entries in insertion order, after server-side filtering.
     pub entries: Vec<AdminLedgerRow>,
-    /// Total entry count.
+    /// Count of entries matching the filter (before any `limit`).
     pub total: u64,
+    /// Per-(provider, currency) aggregates over the filtered set. Empty
+    /// when emitted by a warren-api predating this field.
+    #[serde(default)]
+    pub totals: Vec<AdminLedgerTotalRow>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3977,6 +4092,81 @@ mod tests {
             summary.contains("[no AES-NI"),
             "summary must bracket the reasons: {summary}"
         );
+    }
+
+    #[test]
+    fn pending_voucher_row_deserializes_legacy_json_without_payment_metadata() {
+        // Rolling deploys: an older warren-api emits rows without the
+        // payment-metadata fields; the newer admin client must keep parsing.
+        let row: AdminPendingVoucherRow =
+            serde_json::from_str(r#"{"pending_id":"pi_x","expires_at":123}"#)
+                .expect("legacy wire form must keep deserializing");
+        assert_eq!(row.pending_id, "pi_x");
+        assert_eq!(row.expires_at, 123);
+        assert_eq!(row.provider, None, "absent provider must default to None");
+        assert_eq!(row.currency, None, "absent currency must default to None");
+        assert_eq!(row.amount_units, None, "absent amount must default to None");
+    }
+
+    #[test]
+    fn ledger_response_deserializes_legacy_json_without_totals() {
+        // Rolling deploys: an older warren-api emits no `totals`; the newer
+        // admin client must keep parsing and see an empty aggregate.
+        let resp: AdminLedgerResponse = serde_json::from_str(
+            r#"{"entries":[{"provider":"stripe","amount_minor":700,"currency":"EUR","created_at":0}],"total":1}"#,
+        )
+        .expect("legacy wire form must keep deserializing");
+        assert_eq!(resp.total, 1);
+        assert!(
+            resp.totals.is_empty(),
+            "absent totals must default to empty, not fail parsing"
+        );
+    }
+
+    #[test]
+    fn payment_node_health_row_pins_its_wire_field_names() {
+        let row: AdminPaymentNodeHealthRow = serde_json::from_str(
+            r#"{"node":"btcpay","status":"healthy","detail":"synced","checked_at_unix":9}"#,
+        )
+        .expect("wire form must deserialize");
+        assert_eq!(row.node, "btcpay");
+        assert_eq!(row.status, "healthy");
+        assert_eq!(row.detail, "synced");
+        assert_eq!(row.checked_at_unix, Some(9));
+        let json = serde_json::to_string(&AdminPaymentNodesHealthResponse { nodes: vec![row] })
+            .expect("serialize response");
+        assert!(
+            json.starts_with(r#"{"nodes":[{"node":"btcpay""#),
+            "response wire shape is pinned: {json}"
+        );
+    }
+
+    #[test]
+    fn wpid_lookup_response_round_trips_and_carries_no_address_field() {
+        let resp = AdminWpidLookupResponse {
+            bindings: vec![AdminWpidInvoiceBindingRow {
+                rail: "monero".to_owned(),
+                expires_at_unix: Some(99),
+                locked_amount_native: Some(1_000),
+                granted_duration_secs: Some(2_592_000),
+            }],
+            settled: true,
+            voucher_pull_pending: false,
+            voucher_redeemed: Some(true),
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        // The payment address / subaddress / reference is deliberately NOT
+        // part of this contract: support needs statuses, not watch keys.
+        assert!(!json.contains("address"), "no address may leak: {json}");
+        let parsed: AdminWpidLookupResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.bindings.len(), 1);
+        assert_eq!(parsed.bindings[0].rail, "monero");
+        assert!(parsed.settled);
+        assert!(!parsed.voucher_pull_pending);
+        assert_eq!(parsed.voucher_redeemed, Some(true));
+        let body: AdminWpidLookupBody =
+            serde_json::from_str(r#"{"wpid":"wp_abc"}"#).expect("body wire form");
+        assert_eq!(body.wpid, "wp_abc");
     }
 
     #[test]
