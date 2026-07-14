@@ -879,6 +879,16 @@ pub struct RegisterExitRequest {
     /// stored value). `None` from an exit binary that pre-dates the flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_forward: Option<bool>,
+    /// Whether this exit terminates the TLS-over-TCP fallback carrier on
+    /// `:443/tcp` (`--tcp-fallback`, the anti-censorship datapath for a client
+    /// whose outbound UDP/QUIC is blocked). Warren is mono-IP, so this announces
+    /// a per-exit capability toggle ("a UDP-timeout against this node is worth a
+    /// TCP retry"), not a second IP: some exits do not run the carrier, and the
+    /// client must only arm the TCP fallback where it is actually served. Sticky
+    /// server-side like `port_forward` (a heartbeat that omits it must not blank a
+    /// stored value). `None` from an exit binary that pre-dates the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_fallback: Option<bool>,
 }
 
 /// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
@@ -3244,6 +3254,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3288,6 +3299,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3332,6 +3344,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3370,6 +3383,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3412,6 +3426,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: Some(pin.clone()),
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -3463,6 +3478,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: Some(true),
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -3474,6 +3490,7 @@ mod tests {
 
         let off = RegisterExitRequest {
             port_forward: Some(false),
+            tcp_fallback: None,
             ..req
         };
         let json = serde_json::to_string(&off).unwrap();
@@ -3517,6 +3534,7 @@ mod tests {
             hwqual: None,
             edge_cert_sha256_hex: None,
             port_forward: None,
+            tcp_fallback: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
