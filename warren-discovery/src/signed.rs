@@ -1,5 +1,6 @@
-//! Signed `warren-relays.json` v9 - node (exit/relay/entry) distribution
-//! from warren-api to Warren clients. (v9 added the optional per-node
+//! Signed `warren-relays.json` v10 - node (exit/relay/entry) distribution
+//! from warren-api to Warren clients. (v10 added the optional per-node
+//! `tcp_fallback` carrier capability flag; v9 added the optional per-node
 //! `port_forward` NAT-PMP capability flag; v8 added the optional per-node
 //! `cover_domain` for v6 X.509; the rest of the v7 minimization vocabulary
 //! below is unchanged.)
@@ -12,13 +13,13 @@
 //! client verifies with a known `server_pubkey` (TOFU at boot or
 //! hardcoded pin in prod).
 //!
-//! **Canonical format** (frozen at v9; any further mutation must rotate
-//! to v10):
+//! **Canonical format** (frozen at v10; any further mutation must rotate
+//! to v11):
 //!
 //! ```text
 //! canonical_bytes = serde_json::to_vec(&UnsignedRelayList {
-//!     version: 9,
-//!     nodes,            // each entry is a JsonNode (v9 vocabulary)
+//!     version: 10,
+//!     nodes,            // each entry is a JsonNode (v10 vocabulary)
 //!     generation,       // monotonic content version (anti-rollback)
 //!     signed_at,
 //!     expires_at,       // signed expiry (anti-freeze/replay)
@@ -194,7 +195,7 @@ pub struct JsonNode {
     pub tcp_fallback: Option<bool>,
 }
 
-/// **Signed** node list (full wire format, `relays.json` v9).
+/// **Signed** node list (full wire format, `relays.json` v10).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignedRelayList {
     /// Must equal [`SIGNED_VERSION`].
