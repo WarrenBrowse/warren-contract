@@ -2600,7 +2600,7 @@ pub fn is_valid_token_serial_hex(s: &str) -> bool {
 ///   its serial; the exit never names the subscriber.
 ///
 /// A body carrying both shapes (or neither) is refused with 400.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionOpenRequest {
     /// CLIENT wallet SS58 pubkey - the account whose device count is
     /// capped. NOT the exit's auth identity. Legacy shape only.
@@ -2624,6 +2624,23 @@ pub struct SessionOpenRequest {
     /// no pad, doc 64). Presence selects the v2 shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_b64: Option<String>,
+}
+
+impl fmt::Debug for SessionOpenRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionOpenRequest")
+            .field("pubkey_ss58", &self.pubkey_ss58)
+            .field("device_id_hex", &self.device_id_hex)
+            .field("exit_id", &self.exit_id)
+            .field("max_devices", &self.max_devices)
+            .field(
+                "token_b64",
+                // Redacted: a spendable bearer token must never appear in
+                // logs. Presence is safe (it selects the v2 shape).
+                &self.token_b64.as_deref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Why a `session/open` was refused (`admitted == false`). Extends the
@@ -4019,6 +4036,23 @@ mod tests {
         assert!(
             !debug.contains("supersecret"),
             "Debug must redact the show-once clear token: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn session_open_request_debug_redacts_token() {
+        let req = SessionOpenRequest {
+            pubkey_ss58: None,
+            device_id_hex: None,
+            exit_id: "exit-fr-1".to_owned(),
+            max_devices: None,
+            token_b64: Some("c3BlbmRhYmxlLXRva2VuLWJ5dGVz".to_owned()),
+        };
+        let debug = format!("{req:?}");
+        assert!(
+            !debug.contains("c3BlbmRhYmxlLXRva2VuLWJ5dGVz"),
+            "Debug must redact the spendable session token: {debug}"
         );
         assert!(debug.contains("<redacted>"));
     }
