@@ -32,10 +32,11 @@ pub use multihop_directory::test_helpers;
 
 pub use json_io::JsonError;
 pub use multihop_directory::{
-    DirectoryError, MULTIHOP_DIRECTORY_VERSION, MultiHopDirectoryDraft, NodeEntry,
+    CircuitPolicy, DirectoryError, MULTIHOP_DIRECTORY_VERSION, MultiHopDirectoryDraft, NodeEntry,
     SignedMultiHopDirectory, VerifiedEntry, VerifiedExit, VerifiedMultiHopDirectory,
     ensure_lossless_roundtrip, redact_exit_endpoints, sign_directory_draft,
-    sign_multihop_directory, verify_multihop_directory, verify_multihop_directory_any,
+    sign_multihop_directory, valid_circuits, verify_multihop_directory,
+    verify_multihop_directory_any,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{

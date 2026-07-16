@@ -717,6 +717,9 @@ pub struct VerifiedExit {
     pub endpoint: std::net::SocketAddr,
     /// ISO 3166-1 alpha-2 country.
     pub country: String,
+    /// Autonomous System number (`0` = unknown), the AS-diversity input for
+    /// [`CircuitPolicy`]. Bound by the node attestation, like `country`.
+    pub asn: u32,
     /// City.
     pub city: String,
     /// Selection weight.
@@ -756,6 +759,9 @@ pub struct VerifiedEntry {
     pub endpoint: std::net::SocketAddr,
     /// ISO 3166-1 alpha-2 country.
     pub country: String,
+    /// Autonomous System number (`0` = unknown), the AS-diversity input for
+    /// [`CircuitPolicy`]. Bound by the node attestation, like `country`.
+    pub asn: u32,
     /// City.
     pub city: String,
     /// Selection weight.
@@ -775,7 +781,8 @@ pub struct VerifiedEntry {
 }
 
 impl VerifiedExit {
-    /// The circuit view of this exit dialed through a **distinct** entry node.
+    /// The circuit view of this exit dialed through an entry node that the
+    /// `policy` permits.
     ///
     /// The client dials the ENTRY and forwards to the exit, so three fields
     /// take the entry's values: the dial `endpoint`, the `cover_domain` SNI,
@@ -784,12 +791,16 @@ impl VerifiedExit {
     /// identity). Only what the HPKE-sealed setup frame needs stays the
     /// exit's: `exit_x25519_multihop_pubkey` and the `exit_id` routing tag.
     ///
-    /// Returns `None` when the entry is the exit's own node: a node forwarding
-    /// to itself sees both sides of the circuit, breaking the unlinkability the
-    /// second hop exists for.
+    /// Returns `None` when [`CircuitPolicy::permits`] rejects the pair: a
+    /// same-node circuit (a node forwarding to itself sees both sides, breaking
+    /// unlinkability), a same-country circuit, or a same-AS circuit on a fleet
+    /// spanning multiple ASNs. Taking the policy as an argument makes the
+    /// diversity check impossible to skip: every entry-selected circuit is
+    /// gated by the one shared rule, so an SDK caller can no longer form a
+    /// topology the app forbids.
     #[must_use]
-    pub fn via_entry(&self, entry: &VerifiedEntry) -> Option<VerifiedExit> {
-        if entry.exit_id == self.exit_id {
+    pub fn via_entry(&self, entry: &VerifiedEntry, policy: &CircuitPolicy) -> Option<VerifiedExit> {
+        if !policy.permits(entry, self) {
             return None;
         }
         Some(VerifiedExit {
@@ -805,6 +816,149 @@ impl VerifiedExit {
     }
 }
 
+/// The multi-hop circuit **security policy**: which `(entry, exit)` hop pairs
+/// may legally form a 2-hop circuit. This is the single home of the diversity
+/// rule that every client (the app daemon, iOS, and the SDK family) enforces
+/// identically, so an SDK-built circuit can never be a topology the app's
+/// security rule forbids (audit 94 A5).
+///
+/// The rule: entry and exit are **distinct physical nodes** in **different
+/// countries** (mandatory), and on **different non-zero ASNs** when the fleet
+/// spans two or more ASNs. A single-AS (or AS-unknown) fleet relaxes the AS
+/// clause so a homogeneous deployment can still form circuits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CircuitPolicy {
+    /// AS diversity is mandatory only when the fleet spans at least two
+    /// distinct non-zero ASNs.
+    as_diversity_required: bool,
+}
+
+impl CircuitPolicy {
+    /// Derives the policy from a verified directory's fleet AS spread.
+    #[must_use]
+    pub fn for_directory(dir: &VerifiedMultiHopDirectory) -> Self {
+        Self::from_asns(dir.nodes.iter().map(|n| n.asn))
+    }
+
+    /// Derives the policy from node ASNs (`0` = unknown). For the flat-view
+    /// consumers that hold [`VerifiedMultiHopDirectory::entries`] /
+    /// [`VerifiedMultiHopDirectory::exits`] rather than the directory handle:
+    /// `entries()` projects every vouched node, so its AS set equals the
+    /// fleet's.
+    #[must_use]
+    pub fn from_asns(asns: impl IntoIterator<Item = u32>) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        for asn in asns {
+            if asn != 0 {
+                seen.insert(asn);
+            }
+        }
+        Self {
+            as_diversity_required: seen.len() >= 2,
+        }
+    }
+
+    /// `true` if this fleet mandates AS diversity between the two hops.
+    #[must_use]
+    pub fn as_diversity_required(&self) -> bool {
+        self.as_diversity_required
+    }
+
+    /// `true` iff `entry` and `exit` may form a circuit under this policy:
+    /// distinct nodes, different countries, and different non-zero ASNs when
+    /// AS diversity is required.
+    #[must_use]
+    pub fn permits(&self, entry: &VerifiedEntry, exit: &VerifiedExit) -> bool {
+        circuit_permitted(
+            self.as_diversity_required,
+            &entry.country,
+            entry.asn,
+            &exit.country,
+            exit.asn,
+            entry.exit_id != exit.exit_id,
+        )
+    }
+}
+
+/// The single definition of the circuit diversity rule, shared by
+/// [`CircuitPolicy::permits`] (flat entry/exit views) and [`valid_circuits`]
+/// (the directory `nodes` view) so the invariant has exactly one home and
+/// cannot drift between the app and SDK families.
+fn circuit_permitted(
+    as_diversity_required: bool,
+    entry_country: &str,
+    entry_asn: u32,
+    exit_country: &str,
+    exit_asn: u32,
+    distinct_node: bool,
+) -> bool {
+    distinct_node
+        && !entry_country.eq_ignore_ascii_case(exit_country)
+        && !(as_diversity_required && (entry_asn == 0 || exit_asn == 0 || entry_asn == exit_asn))
+}
+
+/// `true` when `country` satisfies the optional `filter` (empty = any).
+fn country_matches(filter: &str, country: &str) -> bool {
+    filter.is_empty() || filter.eq_ignore_ascii_case(country)
+}
+
+/// Every `(entry_idx, exit_idx)` pair (indices into `dir.nodes`) that forms a
+/// valid circuit under the optional `entry_country` / `exit_country` hints
+/// (empty = any), the [`CircuitPolicy`] diversity rule, and the drained-node
+/// avoid-set `exclude_exit_ids` (an exit id excluded on BOTH legs).
+///
+/// This is the directory-view counterpart of [`CircuitPolicy::permits`], for
+/// callers that select over `dir.nodes` (the app daemon and iOS). The SDK
+/// family selects over the flat entry/exit projections and gates each pair
+/// with [`VerifiedExit::via_entry`], but both paths share `circuit_permitted`,
+/// so the security rule is identical.
+#[must_use]
+pub fn valid_circuits(
+    dir: &VerifiedMultiHopDirectory,
+    entry_country: &str,
+    exit_country: &str,
+    exclude_exit_ids: &[[u8; 16]],
+) -> Vec<(usize, usize)> {
+    let policy = CircuitPolicy::for_directory(dir);
+    let mut pairs = Vec::new();
+    for (i, e) in dir.nodes.iter().enumerate() {
+        if !country_matches(entry_country, &e.country) {
+            continue;
+        }
+        // A drained node is excluded as the ENTRY too: a drain precedes a
+        // whole-box restart (fleet rollout) and its admission gate refuses new
+        // QUIC connections outright, so a circuit entering through it either
+        // dies at the swap or can never be dialed at all.
+        if exclude_exit_ids.contains(e.exit.exit_id.as_bytes()) {
+            continue;
+        }
+        for (j, x) in dir.nodes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            if !country_matches(exit_country, &x.country) {
+                continue;
+            }
+            // ADR 36: skip an exit that signalled a maintenance drain so a
+            // drain-triggered reconnect lands on a different exit.
+            if exclude_exit_ids.contains(x.exit.exit_id.as_bytes()) {
+                continue;
+            }
+            if circuit_permitted(
+                policy.as_diversity_required,
+                &e.country,
+                e.asn,
+                &x.country,
+                x.asn,
+                e.relay.relay_id != x.relay.relay_id,
+            ) {
+                pairs.push((i, j));
+            }
+        }
+    }
+    pairs
+}
+
 impl VerifiedMultiHopDirectory {
     /// The trusted nodes projected as entry hops.
     #[must_use]
@@ -815,6 +969,7 @@ impl VerifiedMultiHopDirectory {
                 relay_ed25519_pubkey: n.relay.relay_ed25519_pubkey,
                 endpoint: n.relay.endpoint,
                 country: n.country.clone(),
+                asn: n.asn,
                 city: n.city.clone(),
                 weight: n.weight,
                 cover_domain: n.relay.cover_domain.clone(),
@@ -836,6 +991,7 @@ impl VerifiedMultiHopDirectory {
                 exit_x25519_multihop_pubkey: n.exit.exit_x25519_multihop_pubkey,
                 endpoint: n.relay.endpoint,
                 country: n.country.clone(),
+                asn: n.asn,
                 city: n.city.clone(),
                 weight: n.weight,
                 dns_disabled: n.exit.dns_disabled,
@@ -1277,8 +1433,9 @@ mod tests {
             .iter()
             .find(|e| e.country == "de")
             .expect("de entry");
+        let policy = CircuitPolicy::for_directory(&v);
         let dialed = exit
-            .via_entry(entry)
+            .via_entry(entry, &policy)
             .expect("distinct nodes form a circuit");
         assert_eq!(
             dialed.exit_mlkem768_pubkey.as_deref(),
@@ -1591,8 +1748,9 @@ mod tests {
             .find(|e| e.country == "de")
             .expect("de entry");
 
+        let policy = CircuitPolicy::for_directory(&v);
         let dialed = exit
-            .via_entry(de_entry)
+            .via_entry(de_entry, &policy)
             .expect("two distinct nodes form a circuit");
         // The dial target, SNI and the DIALED-HOP identity come from the entry;
         // only what the sealed frame needs (HPKE key, routing id) stays the
@@ -1622,7 +1780,7 @@ mod tests {
             .find(|e| e.country == "fr")
             .expect("fr entry");
         assert!(
-            exit.via_entry(fr_entry).is_none(),
+            exit.via_entry(fr_entry, &policy).is_none(),
             "entry == exit node must be refused (unlinkability rule)"
         );
     }
@@ -1767,8 +1925,9 @@ mod tests {
             .expect("verify");
         let exit = v.exits().into_iter().find(|e| e.country == "fr").unwrap();
         let entry = v.entries().into_iter().find(|e| e.country == "de").unwrap();
+        let policy = CircuitPolicy::for_directory(&v);
         let dialed = exit
-            .via_entry(&entry)
+            .via_entry(&entry, &policy)
             .expect("two distinct nodes form a circuit");
         assert_eq!(
             dialed.edge_cert_sha256,
@@ -1831,13 +1990,162 @@ mod tests {
             .expect("verify");
         let exit = v.exits().into_iter().find(|e| e.country == "fr").unwrap();
         let entry = v.entries().into_iter().find(|e| e.country == "de").unwrap();
+        let policy = CircuitPolicy::for_directory(&v);
         let dialed = exit
-            .via_entry(&entry)
+            .via_entry(&entry, &policy)
             .expect("two distinct nodes form a circuit");
         assert!(
             !dialed.tcp_fallback,
             "the circuit must take the entry's carrier flag, not the exit's"
         );
+    }
+
+    /// Verifies a directory of `(country, asn)` nodes so the policy fixtures
+    /// below exercise the real projection, not hand-built structs.
+    fn verified_dir(nodes: &[(&str, u32)]) -> VerifiedMultiHopDirectory {
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let nodes = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (country, asn))| signed_node(&op, (i + 1) as u8, country, *asn))
+            .collect();
+        let signed = build(&root, &op, &server, nodes);
+        let json = serde_json::to_string(&signed).unwrap();
+        verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)]).expect("verify")
+    }
+
+    #[test]
+    fn policy_rejects_a_same_country_circuit() {
+        // Two distinct FR nodes: distinct-node passes but the mandatory country
+        // diversity rule must forbid the circuit. This is exactly what the old
+        // `via_entry` (distinct-node only) let SDK/TS build.
+        let v = verified_dir(&[("fr", 0), ("fr", 0)]);
+        let policy = CircuitPolicy::for_directory(&v);
+        let exits = v.exits();
+        let entries = v.entries();
+        assert_ne!(
+            entries[1].exit_id, exits[0].exit_id,
+            "the two nodes are distinct, so the old distinct-node check alone would have permitted this same-country circuit"
+        );
+        assert!(
+            !policy.permits(&entries[1], &exits[0]),
+            "a same-country circuit must be rejected"
+        );
+        assert!(
+            exits[0].via_entry(&entries[1], &policy).is_none(),
+            "via_entry must refuse a same-country pair"
+        );
+        assert!(
+            valid_circuits(&v, "", "", &[]).is_empty(),
+            "no cross-country pair exists in an all-FR fleet"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_a_same_as_circuit_when_the_fleet_is_multi_as() {
+        // FR and DE share AS100; SE is on AS200. With >= 2 ASNs, AS diversity
+        // is mandatory, so FR<->DE is forbidden despite different countries.
+        let v = verified_dir(&[("fr", 100), ("de", 100), ("se", 200)]);
+        let policy = CircuitPolicy::for_directory(&v);
+        assert!(
+            policy.as_diversity_required(),
+            "a 2-ASN fleet mandates AS diversity"
+        );
+        let exits = v.exits();
+        let entries = v.entries();
+        let fr = exits.iter().find(|e| e.country == "fr").unwrap();
+        let de_entry = entries.iter().find(|e| e.country == "de").unwrap();
+        assert!(
+            !policy.permits(de_entry, fr),
+            "a same-AS circuit must be rejected on a multi-AS fleet"
+        );
+
+        let pairs = valid_circuits(&v, "", "", &[]);
+        assert!(!pairs.is_empty());
+        for (i, j) in &pairs {
+            assert_ne!(
+                v.nodes[*i].asn, v.nodes[*j].asn,
+                "no surviving pair shares an ASN"
+            );
+            assert_ne!(v.nodes[*i].asn, 0);
+            assert_ne!(v.nodes[*j].asn, 0);
+        }
+        // Only the four ordered pairs that involve the AS200 node survive.
+        assert_eq!(pairs.len(), 4);
+    }
+
+    #[test]
+    fn policy_allows_same_as_on_a_single_as_fleet() {
+        // One distinct non-zero ASN across the fleet relaxes the AS clause, so
+        // a cross-country circuit sharing that ASN is legal (a homogeneous
+        // single-provider deployment must still form circuits).
+        let v = verified_dir(&[("fr", 100), ("de", 100)]);
+        let policy = CircuitPolicy::for_directory(&v);
+        assert!(
+            !policy.as_diversity_required(),
+            "a single-ASN fleet relaxes AS diversity"
+        );
+        let exits = v.exits();
+        let entries = v.entries();
+        let fr = exits.iter().find(|e| e.country == "fr").unwrap();
+        let de_entry = entries.iter().find(|e| e.country == "de").unwrap();
+        assert!(
+            policy.permits(de_entry, fr),
+            "same-AS cross-country must be allowed when the fleet has a single ASN"
+        );
+        assert_eq!(
+            valid_circuits(&v, "", "", &[]).len(),
+            2,
+            "both ordered cross-country pairs are valid"
+        );
+    }
+
+    #[test]
+    fn policy_excludes_a_drained_node_on_both_legs() {
+        // ADR 36: a drained exit must never appear as an exit OR an entry.
+        let v = verified_dir(&[("fr", 0), ("de", 0), ("se", 0)]);
+        let de_exit = *v.nodes[1].exit.exit_id.as_bytes();
+        assert!(
+            valid_circuits(&v, "", "", &[])
+                .iter()
+                .any(|&(_, x)| *v.nodes[x].exit.exit_id.as_bytes() == de_exit),
+            "DE must be selectable before it drains"
+        );
+        let pairs = valid_circuits(&v, "", "", &[de_exit]);
+        assert!(!pairs.is_empty(), "other nodes remain selectable");
+        for (e, x) in &pairs {
+            assert_ne!(
+                *v.nodes[*x].exit.exit_id.as_bytes(),
+                de_exit,
+                "drained node never an exit"
+            );
+            assert_ne!(
+                *v.nodes[*e].exit.exit_id.as_bytes(),
+                de_exit,
+                "drained node never an entry"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_requires_distinct_nodes() {
+        // A single node cannot form a circuit with itself: via_entry refuses the
+        // co-located entry, and valid_circuits never pairs a node with itself.
+        let v = verified_dir(&[("fr", 100), ("de", 200)]);
+        let policy = CircuitPolicy::for_directory(&v);
+        let exit = &v.exits()[0];
+        let own_entry = v
+            .entries()
+            .into_iter()
+            .find(|e| e.exit_id == exit.exit_id)
+            .unwrap();
+        assert!(
+            exit.via_entry(&own_entry, &policy).is_none(),
+            "a node forwarding to itself breaks unlinkability and must be refused"
+        );
+        for (i, j) in valid_circuits(&v, "", "", &[]) {
+            assert_ne!(i, j, "valid_circuits never pairs a node with itself");
+        }
     }
 
     #[test]
