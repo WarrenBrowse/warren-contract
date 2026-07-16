@@ -7,6 +7,9 @@
 //! - [`dto`]: the HTTP `/v1` API request/response types.
 //! - [`release`]: the offline-signed exit-release manifest (fleet update
 //!   authority).
+//! - [`product`]: product/deployment anchors (API URL, pinned keys) and the one
+//!   env-var name that overrides each.
+//! - [`crate::env`]: shared environment-value parsing (lenient boolean knobs).
 //!
 //! The `warren-discovery` workspace member (crate `warren-discovery-core`)
 //! carries the signed relay list / roster / multi-hop directory formats and
@@ -14,6 +17,8 @@
 
 pub mod auth;
 pub mod dto;
+pub mod env;
+pub mod product;
 pub mod release;
 pub mod ss58;
 
