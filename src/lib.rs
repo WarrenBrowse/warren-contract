@@ -12,6 +12,8 @@
 //! - [`crate::env`]: shared environment-value parsing (lenient boolean knobs).
 //! - [`phase`]: the connection-phase reduction that decides the "protected"
 //!   green state, shared by the app and the browser extension.
+//! - [`fallback`]: the canonical anti-censorship HTTP fallback attempt
+//!   sequence.
 //!
 //! The `warren-discovery` workspace member (crate `warren-discovery-core`)
 //! carries the signed relay list / roster / multi-hop directory formats and
@@ -20,6 +22,7 @@
 pub mod auth;
 pub mod dto;
 pub mod env;
+pub mod fallback;
 pub mod phase;
 pub mod product;
 pub mod release;
