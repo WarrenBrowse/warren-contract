@@ -820,7 +820,7 @@ impl VerifiedExit {
 /// may legally form a 2-hop circuit. This is the single home of the diversity
 /// rule that every client (the app daemon, iOS, and the SDK family) enforces
 /// identically, so an SDK-built circuit can never be a topology the app's
-/// security rule forbids (audit 94 A5).
+/// security rule forbids.
 ///
 /// The rule: entry and exit are **distinct physical nodes** in **different
 /// countries** (mandatory), and on **different non-zero ASNs** when the fleet
