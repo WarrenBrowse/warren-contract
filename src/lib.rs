@@ -10,6 +10,8 @@
 //! - [`product`]: product/deployment anchors (API URL, pinned keys) and the one
 //!   env-var name that overrides each.
 //! - [`crate::env`]: shared environment-value parsing (lenient boolean knobs).
+//! - [`phase`]: the connection-phase reduction that decides the "protected"
+//!   green state, shared by the app and the browser extension.
 //!
 //! The `warren-discovery` workspace member (crate `warren-discovery-core`)
 //! carries the signed relay list / roster / multi-hop directory formats and
@@ -18,6 +20,7 @@
 pub mod auth;
 pub mod dto;
 pub mod env;
+pub mod phase;
 pub mod product;
 pub mod release;
 pub mod ss58;
