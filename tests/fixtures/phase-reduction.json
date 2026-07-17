@@ -1,0 +1,378 @@
+[
+  {
+    "status": {
+      "state": "connected"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "protected"
+  },
+  {
+    "status": {
+      "state": "connected"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "connected"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "connected"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "connecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "connecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "connecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "connecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "disconnecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "disconnecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "disconnecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "disconnecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "draining"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "draining"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "draining"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "draining"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "connecting"
+  },
+  {
+    "status": {
+      "state": "reconnecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "reconnecting"
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "reconnecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "reconnecting"
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "interrupted"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": false
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": false
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": false
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": false
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": true
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": true
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": true
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "disconnected",
+      "lockedDown": true
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": false
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": false
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": false
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": false
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "blocked"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": true
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": false
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": true
+    },
+    "egress": {
+      "hostOffline": false,
+      "exitEgressDead": true
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": true
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": false
+    },
+    "phase": "exposed"
+  },
+  {
+    "status": {
+      "state": "error",
+      "blockingError": true
+    },
+    "egress": {
+      "hostOffline": true,
+      "exitEgressDead": true
+    },
+    "phase": "exposed"
+  }
+]

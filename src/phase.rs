@@ -48,8 +48,11 @@ pub enum ConnectionPhase {
 
 /// Neutral, daemon-agnostic tunnel status. It is the union of the states the
 /// desktop daemon and the extension host each report, so one reduction serves
-/// both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// both. The serialized shape (a lowercase `state` tag plus camelCase fields)
+/// is the cross-language spelling the shared phase-reduction fixture and the
+/// TypeScript union use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
 pub enum TunnelStatus {
     /// The tunnel session is established.
     Connected,
@@ -64,12 +67,14 @@ pub enum TunnelStatus {
     /// No tunnel. `locked_down` is the kill switch still holding traffic.
     Disconnected {
         /// Whether the kill switch is holding traffic while disconnected.
+        #[serde(rename = "lockedDown")]
         locked_down: bool,
     },
     /// The tunnel is in an error state. `blocking_error` means the daemon
     /// failed to install the block, so traffic may be leaking.
     Error {
         /// Whether the block itself failed (traffic may leak).
+        #[serde(rename = "blockingError")]
         blocking_error: bool,
     },
 }
@@ -77,7 +82,8 @@ pub enum TunnelStatus {
 /// Liveness evidence about the egress path, gathered outside the tunnel state
 /// machine (an active egress probe and the host-reachability watcher). It is
 /// the extra input that keeps `Protected` honest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EgressEvidence {
     /// The local host lost connectivity (for example a Wi-Fi to LTE handover)
     /// while the daemon still reports `Connected`.
