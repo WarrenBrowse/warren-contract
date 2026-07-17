@@ -20,6 +20,7 @@
 mod envelope;
 mod json_io;
 mod multihop_directory;
+mod path_aware;
 mod query;
 mod relay;
 mod roster;
@@ -37,6 +38,10 @@ pub use multihop_directory::{
     ensure_lossless_roundtrip, redact_exit_endpoints, sign_directory_draft,
     sign_multihop_directory, valid_circuits, verify_multihop_directory,
     verify_multihop_directory_any,
+};
+pub use path_aware::{
+    EntryPathQuality, LegQuality, PATH_QUALITY_DEGRADED_RTT_MS, PATH_QUALITY_VERSION,
+    PathAwareParams, PathQualityAdvisory, pick_circuit_by_weight, select_circuit_path_aware,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{
