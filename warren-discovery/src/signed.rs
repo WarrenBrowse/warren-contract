@@ -314,6 +314,29 @@ impl From<envelope::DecodeError> for SignedError {
     }
 }
 
+impl SignedError {
+    /// Stable, secret-free category for logs and metrics. A caller that only
+    /// wants to say a directory verify failed (returning cached/empty) can log
+    /// this to keep the failure classes operationally distinct: a pin mismatch,
+    /// an unsupported version, and a canonicalization/signature failure demand
+    /// very different responses, and the `Display` string is a human sentence,
+    /// not a stable label. Never carries a key, address, or other identity
+    /// material, so it is safe to emit at any log level.
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::Json(_) => "malformed-json",
+            Self::UnsupportedVersion { .. } => "unsupported-version",
+            Self::ServerPubkeyMismatch { .. } => "server-pubkey-mismatch",
+            Self::InvalidHex => "invalid-hex",
+            Self::PubkeyNotOnCurve => "pubkey-not-on-curve",
+            Self::BadSignature => "bad-signature",
+            Self::Relay(_) => "malformed-node",
+            Self::InputTooLarge => "input-too-large",
+        }
+    }
+}
+
 /// Signs a node list with the server key. warren-api side only.
 ///
 /// - `generation`: monotonic content version (rollback protection).
@@ -1100,5 +1123,91 @@ mod tests {
         let json = r#"{"version":8,"nodes":[],"generation":0,"signed_at":0,"expires_at":0,"server_pubkey_hex":"00","signature_hex":"00"}"#;
         let err = verify_signed_relay_list(json, None).expect_err("v8 must be rejected post-v9");
         assert!(matches!(err, SignedError::UnsupportedVersion { got: 8 }));
+    }
+
+    #[test]
+    fn reason_code_is_distinct_and_secret_free_per_variant() {
+        // The whole point of the category is to keep failure classes
+        // operationally distinct, so no two variants may collapse to the same
+        // code, and a code must never carry identity material even when the
+        // variant does (ServerPubkeyMismatch holds redacted key prefixes).
+        let variants = [
+            SignedError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            SignedError::UnsupportedVersion { got: 9 },
+            SignedError::ServerPubkeyMismatch {
+                got: "deadbeef".to_owned(),
+                expected: "feedface".to_owned(),
+            },
+            SignedError::InvalidHex,
+            SignedError::PubkeyNotOnCurve,
+            SignedError::BadSignature,
+            SignedError::Relay(JsonError::InvalidFamily("v6".to_owned())),
+            SignedError::InputTooLarge,
+        ];
+        let codes: Vec<&str> = variants.iter().map(SignedError::reason_code).collect();
+        for code in &codes {
+            assert!(!code.is_empty(), "reason_code must be non-empty");
+            assert!(
+                !code.contains("deadbeef") && !code.contains("feedface"),
+                "reason_code must not leak the variant's payload: {code}"
+            );
+        }
+        let unique: std::collections::HashSet<&&str> = codes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "each variant needs a distinct reason_code: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn reason_code_tags_the_error_each_verify_failure_produces() {
+        // Tie the codes to the real failure paths a caller sees, so a swallowed
+        // Err can be logged with the check that actually failed instead of a
+        // fixed "signature verify failed" string.
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let good = serde_json::to_string(&signed).unwrap();
+
+        let mut tampered = signed.clone();
+        tampered.nodes[0].endpoints[0].addr = "127.0.0.2".to_owned();
+        let bad_sig = serde_json::to_string(&tampered).unwrap();
+        assert_eq!(
+            verify_signed_relay_list(&bad_sig, None)
+                .unwrap_err()
+                .reason_code(),
+            "bad-signature"
+        );
+
+        let wrong_pin = hex::encode([0xff; 32]);
+        assert_eq!(
+            verify_signed_relay_list(&good, Some(&wrong_pin))
+                .unwrap_err()
+                .reason_code(),
+            "server-pubkey-mismatch"
+        );
+
+        let older = r#"{"version":9,"nodes":[],"generation":0,"signed_at":0,"expires_at":0,"server_pubkey_hex":"00","signature_hex":"00"}"#;
+        assert_eq!(
+            verify_signed_relay_list(older, None)
+                .unwrap_err()
+                .reason_code(),
+            "unsupported-version"
+        );
+
+        assert_eq!(
+            verify_signed_relay_list("not json", None)
+                .unwrap_err()
+                .reason_code(),
+            "malformed-json"
+        );
+
+        let oversize = "0".repeat(envelope::MAX_VERIFY_INPUT_LEN + 1);
+        assert_eq!(
+            verify_signed_relay_list(&oversize, None)
+                .unwrap_err()
+                .reason_code(),
+            "input-too-large"
+        );
     }
 }
