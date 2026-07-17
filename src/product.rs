@@ -45,6 +45,13 @@ pub const MULTIHOP_ROOT_PUBKEY_ENV: &str = "WARREN_MULTIHOP_ROOT_PUBKEY";
 /// client never sends the user to a stale `warrenbrowse.com/pricing` variant.
 pub const CHECKOUT_URL: &str = "https://checkout.warrenbrowse.com/";
 
+/// The product `User-Agent` every Warren client sends on API calls. One shared
+/// versionless token (the production app's proven value) so the API cannot
+/// distinguish client kinds or builds from the UA: uniformity IS the
+/// fingerprint-minimization. SDK HTTP paths that cannot set a UA (browser
+/// `fetch` drops it) simply keep the platform default.
+pub const USER_AGENT: &str = "warren-app";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +81,16 @@ mod tests {
         for url in [API_URL, CHECKOUT_URL] {
             assert!(url.starts_with("https://"), "{url} must be https");
         }
+    }
+
+    #[test]
+    fn user_agent_is_the_versionless_product_token() {
+        assert_eq!(USER_AGENT, "warren-app");
+        assert!(
+            !USER_AGENT.chars().any(|c| c.is_ascii_digit() || c == '/'),
+            "the product UA must stay versionless: a version component would let \
+             the API fingerprint client builds"
+        );
     }
 
     #[test]
