@@ -129,6 +129,64 @@ impl VerifiedRelease {
     }
 }
 
+/// Errors of the detached Ed25519 canonical-preimage recipe.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DetachedSignatureError {
+    /// Invalid hex for the pubkey or the signature.
+    #[error("invalid hex encoding")]
+    InvalidHex,
+    /// Signer pubkey is not a valid Ed25519 point.
+    #[error("signer pubkey is not a valid Ed25519 point")]
+    PubkeyNotOnCurve,
+    /// Signature does not verify against the preimage.
+    #[error("signature verification failed")]
+    BadSignature,
+}
+
+/// Signs a canonical preimage, returning `(signer_pubkey_hex,
+/// signature_hex)` in the shared wire encoding (lowercase hex, 64/128
+/// chars). THE detached-signature recipe every signed Warren artifact
+/// uses (release manifest here, node-agent bundle index, ...): one home so
+/// consumers cannot drift on hex, curve or strictness handling.
+#[must_use]
+pub fn sign_canonical_preimage(preimage: &[u8], signer_key: &SigningKey) -> (String, String) {
+    let signature = signer_key.sign(preimage);
+    (
+        hex::encode(signer_key.verifying_key().as_bytes()),
+        hex::encode(signature.to_bytes()),
+    )
+}
+
+/// Verifies a detached Ed25519 signature over a canonical preimage
+/// (`verify_strict`, rejecting malleable/small-order forms). Counterpart
+/// of [`sign_canonical_preimage`]; pin equality against the expected
+/// signer stays with the caller (pin semantics are per-artifact).
+///
+/// # Errors
+///
+/// See [`DetachedSignatureError`]; every variant is a hard reject.
+pub fn verify_canonical_preimage(
+    preimage: &[u8],
+    signer_pubkey_hex: &str,
+    signature_hex: &str,
+) -> Result<(), DetachedSignatureError> {
+    let pubkey_bytes: [u8; 32] = hex::decode(signer_pubkey_hex)
+        .map_err(|_| DetachedSignatureError::InvalidHex)?
+        .try_into()
+        .map_err(|_| DetachedSignatureError::InvalidHex)?;
+    let pubkey = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|_| DetachedSignatureError::PubkeyNotOnCurve)?;
+    let sig_bytes: [u8; 64] = hex::decode(signature_hex)
+        .map_err(|_| DetachedSignatureError::InvalidHex)?
+        .try_into()
+        .map_err(|_| DetachedSignatureError::InvalidHex)?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    pubkey
+        .verify_strict(preimage, &signature)
+        .map_err(|_| DetachedSignatureError::BadSignature)
+}
+
 /// Errors of the signed release manifest format.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -204,8 +262,8 @@ pub fn sign_release_manifest(
         signer_pubkey_hex,
         signature_hex: String::new(),
     };
-    let signature = signer_key.sign(&canonical_preimage(&manifest));
-    manifest.signature_hex = hex::encode(signature.to_bytes());
+    let (_, signature_hex) = sign_canonical_preimage(&canonical_preimage(&manifest), signer_key);
+    manifest.signature_hex = signature_hex;
     manifest
 }
 
@@ -247,21 +305,16 @@ pub fn verify_release_manifest(
         });
     }
 
-    let pubkey_bytes: [u8; 32] = hex::decode(&signed.signer_pubkey_hex)
-        .map_err(|_| ReleaseError::InvalidHex)?
-        .try_into()
-        .map_err(|_| ReleaseError::InvalidHex)?;
-    let pubkey =
-        VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| ReleaseError::PubkeyNotOnCurve)?;
-    let sig_bytes: [u8; 64] = hex::decode(&signed.signature_hex)
-        .map_err(|_| ReleaseError::InvalidHex)?
-        .try_into()
-        .map_err(|_| ReleaseError::InvalidHex)?;
-    let signature = Signature::from_bytes(&sig_bytes);
-
-    pubkey
-        .verify_strict(&canonical_preimage(&signed), &signature)
-        .map_err(|_| ReleaseError::BadSignature)?;
+    verify_canonical_preimage(
+        &canonical_preimage(&signed),
+        &signed.signer_pubkey_hex,
+        &signed.signature_hex,
+    )
+    .map_err(|e| match e {
+        DetachedSignatureError::InvalidHex => ReleaseError::InvalidHex,
+        DetachedSignatureError::PubkeyNotOnCurve => ReleaseError::PubkeyNotOnCurve,
+        DetachedSignatureError::BadSignature => ReleaseError::BadSignature,
+    })?;
 
     Ok(VerifiedRelease {
         release_version: signed.release_version,
