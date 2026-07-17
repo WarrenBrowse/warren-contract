@@ -24,6 +24,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  anti-refrag:
+    name: anti-refragmentation gate
+    runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # The gate's offline `cargo metadata --no-deps` resolves the [patch] to the
+      # sibling engine, so clone it (same step as the checks job).
+      - name: checkout warrenguard engine
+        env:
+          ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          REV="$(tr -d '[:space:]' < .warrenguard-version)"
+          if [ -n "${ENGINE_TOKEN:-}" ]; then
+            URL="https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git"
+          else
+            URL="git@github.com:WarrenBrowse/warrenguard.git"
+          fi
+          rm -rf ../warrenguard
+          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
+          git clone --quiet "${URL}" ../warrenguard
+          git -C ../warrenguard checkout --quiet "${REV}"
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: single-home dependency-direction gate (doc 94 / doc 47 s5)
+        run: bash scripts/ci/anti-refrag.sh
+
   checks:
     name: fmt + clippy + test
     runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
