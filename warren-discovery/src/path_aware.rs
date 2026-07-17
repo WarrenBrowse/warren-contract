@@ -31,7 +31,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::multihop_directory::{NodeEntry, VerifiedMultiHopDirectory};
+use super::multihop_directory::{
+    CircuitPolicy, NodeEntry, VerifiedEntry, VerifiedExit, VerifiedMultiHopDirectory,
+};
 
 /// Version of the path-quality advisory wire format. The advisory is
 /// unsigned, so unknown fields are ignored and this version only gates
@@ -207,24 +209,12 @@ where
     let score = |&(i, j): &(usize, usize)| -> u128 {
         let entry = &dir.nodes[i];
         let exit = &dir.nodes[j];
-        // Saturate in u64 exactly like [`pick_circuit_by_weight`], so the
-        // no-signal ranking (equal costs) reproduces it bit-for-bit even
-        // where the product saturates.
-        let weight = u128::from(entry.weight.max(1).saturating_mul(exit.weight.max(1)));
-        let client_ms = entry_rtt_ms(entry).unwrap_or(params.neutral_rtt_ms);
-        let (leg_ms, degraded) = fresh_leg(entry, exit)
-            .map_or((params.neutral_rtt_ms, false), |l| (l.rtt_ms, l.degraded));
-        let k = u128::from(params.half_score_rtt_ms.max(1));
-        let cost = u128::from(client_ms).saturating_add(u128::from(leg_ms));
-        let mut s = weight
-            .saturating_mul(SCORE_SCALE)
-            .saturating_mul(k)
-            .checked_div(k.saturating_add(cost))
-            .unwrap_or(0);
-        if degraded {
-            s /= u128::from(params.degraded_penalty_div.max(1));
-        }
-        s
+        path_score(
+            entry.weight.max(1).saturating_mul(exit.weight.max(1)),
+            entry_rtt_ms(entry).unwrap_or(params.neutral_rtt_ms),
+            fresh_leg(entry, exit).map(|l| (l.rtt_ms, l.degraded)),
+            params,
+        )
     };
 
     let mut ranked: Vec<(usize, usize)> = pairs.to_vec();
@@ -259,6 +249,100 @@ where
 /// Fixed-point scale of the path factor `K/(K+cost)` so integer scoring
 /// keeps enough resolution to rank realistic weights deterministically.
 const SCORE_SCALE: u128 = 1_000_000;
+
+/// The one scoring rule both selection views share:
+/// `weight * SCALE * K / (K + client_ms + leg_ms)`, with the degraded
+/// divisor applied last. `leg` is the fresh advisory sample, if any; the
+/// weight product is pre-saturated in u64 by the caller so the no-signal
+/// ranking reproduces [`pick_circuit_by_weight`] bit-for-bit.
+fn path_score(
+    weight: u64,
+    client_ms: u32,
+    leg: Option<(u32, bool)>,
+    params: &PathAwareParams,
+) -> u128 {
+    let (leg_ms, degraded) = leg.unwrap_or((params.neutral_rtt_ms, false));
+    let k = u128::from(params.half_score_rtt_ms.max(1));
+    let cost = u128::from(client_ms).saturating_add(u128::from(leg_ms));
+    let mut s = u128::from(weight)
+        .saturating_mul(SCORE_SCALE)
+        .saturating_mul(k)
+        .checked_div(k.saturating_add(cost))
+        .unwrap_or(0);
+    if degraded {
+        s /= u128::from(params.degraded_penalty_div.max(1));
+    }
+    s
+}
+
+/// Path-aware ENTRY pick for one already-chosen `exit`, over the flat
+/// entry projection the SDK family consumes: the same scoring and
+/// hysteresis as [`select_circuit_path_aware`], gated by
+/// [`CircuitPolicy::permits`] so no candidate can violate the diversity
+/// rule. The advisory keys entries by node id (dual-role fleet:
+/// `relay_id == exit_id`), which the flat view carries as
+/// [`VerifiedEntry::exit_id`].
+///
+/// `prev_entry_node_id` is the currently-flying entry's node id; it is
+/// retained under the same margin/degraded rules as the pair view.
+/// `None` when no entry is policy-permitted for this exit.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn select_entry_path_aware<'a, F>(
+    entries: &'a [VerifiedEntry],
+    exit: &VerifiedExit,
+    policy: &CircuitPolicy,
+    advisory: Option<&PathQualityAdvisory>,
+    entry_rtt_ms: F,
+    now_unix: u64,
+    prev_entry_node_id: Option<&[u8; 16]>,
+    params: &PathAwareParams,
+) -> Option<&'a VerifiedEntry>
+where
+    F: Fn(&VerifiedEntry) -> Option<u32>,
+{
+    let fresh_leg = |entry: &VerifiedEntry| -> Option<(u32, bool)> {
+        let l = advisory?.leg(&entry.exit_id, &exit.exit_id)?;
+        (now_unix.saturating_sub(l.sampled_at) <= params.stale_after_secs)
+            .then_some((l.rtt_ms, l.degraded))
+    };
+    let score = |entry: &VerifiedEntry| -> u128 {
+        path_score(
+            entry.weight.max(1).saturating_mul(exit.weight.max(1)),
+            entry_rtt_ms(entry).unwrap_or(params.neutral_rtt_ms),
+            fresh_leg(entry),
+            params,
+        )
+    };
+
+    let mut ranked: Vec<&VerifiedEntry> =
+        entries.iter().filter(|e| policy.permits(e, exit)).collect();
+    ranked.sort_by(|a, b| {
+        score(b)
+            .cmp(&score(a))
+            .then_with(|| a.exit_id.cmp(&b.exit_id))
+    });
+    let best = *ranked.first()?;
+
+    let Some(prev_id) = prev_entry_node_id else {
+        return Some(best);
+    };
+    let Some(incumbent) = ranked.iter().copied().find(|e| e.exit_id == *prev_id) else {
+        return Some(best);
+    };
+    if fresh_leg(incumbent).is_some_and(|(_, degraded)| degraded) {
+        return Some(best);
+    }
+    let challenger_bar = score(incumbent)
+        .saturating_mul(u128::from(100 + params.switch_margin_pct))
+        .checked_div(100)
+        .unwrap_or(u128::MAX);
+    if score(best) > challenger_bar {
+        Some(best)
+    } else {
+        Some(incumbent)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -648,6 +732,133 @@ mod tests {
             ),
             Some((1, 2))
         );
+    }
+
+    #[test]
+    fn entry_selection_gates_by_policy_and_prefers_low_rtt_leg() {
+        // Node 3 (NL) is the chosen exit. Node 4 (NL) has a dream leg but
+        // shares the exit's country; node 3 itself is the same node: both
+        // must be policy-excluded. Between FI and DE, the measured 11 ms
+        // leg must beat the 290 ms one.
+        let d = dir(vec![
+            node(1, "FI", 100),
+            node(2, "DE", 100),
+            node(3, "NL", 100),
+            node(4, "NL", 100),
+        ]);
+        let entries = d.entries();
+        let exits = d.exits();
+        let policy = super::super::multihop_directory::CircuitPolicy::for_directory(&d);
+        let exit = &exits[2];
+        let adv = advisory_for(vec![
+            (1, vec![leg(3, 290, false, NOW)]),
+            (2, vec![leg(3, 11, false, NOW)]),
+            (4, vec![leg(3, 1, false, NOW)]),
+        ]);
+        let picked = select_entry_path_aware(
+            &entries,
+            exit,
+            &policy,
+            Some(&adv),
+            |_| None,
+            NOW,
+            None,
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(picked.exit_id, [2; 16]);
+    }
+
+    #[test]
+    fn entry_selection_without_signal_takes_highest_weight_then_id() {
+        let d = dir(vec![
+            node(1, "FI", 100),
+            node(2, "DE", 500),
+            node(3, "NL", 100),
+        ]);
+        let entries = d.entries();
+        let exits = d.exits();
+        let policy = super::super::multihop_directory::CircuitPolicy::for_directory(&d);
+        let picked = select_entry_path_aware(
+            &entries,
+            &exits[2],
+            &policy,
+            None,
+            |_| None,
+            NOW,
+            None,
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(picked.exit_id, [2; 16], "highest weight wins");
+
+        let d_tie = dir(vec![
+            node(1, "FI", 100),
+            node(2, "DE", 100),
+            node(3, "NL", 100),
+        ]);
+        let entries_tie = d_tie.entries();
+        let exits_tie = d_tie.exits();
+        let picked_tie = select_entry_path_aware(
+            &entries_tie,
+            &exits_tie[2],
+            &policy,
+            None,
+            |_| None,
+            NOW,
+            None,
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(picked_tie.exit_id, [1; 16], "ties break on ascending id");
+    }
+
+    #[test]
+    fn entry_selection_hysteresis_keeps_previous_within_margin() {
+        let d = dir(vec![
+            node(1, "FI", 100),
+            node(2, "DE", 100),
+            node(3, "NL", 100),
+        ]);
+        let entries = d.entries();
+        let exits = d.exits();
+        let policy = super::super::multihop_directory::CircuitPolicy::for_directory(&d);
+        let adv = advisory_for(vec![
+            (1, vec![leg(3, 60, false, NOW)]),
+            (2, vec![leg(3, 45, false, NOW)]),
+        ]);
+        let kept = select_entry_path_aware(
+            &entries,
+            &exits[2],
+            &policy,
+            Some(&adv),
+            |_| None,
+            NOW,
+            Some(&[1; 16]),
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            kept.exit_id, [1; 16],
+            "within-margin challenger is held off"
+        );
+
+        let adv_bad = advisory_for(vec![
+            (1, vec![leg(3, 290, false, NOW)]),
+            (2, vec![leg(3, 11, false, NOW)]),
+        ]);
+        let switched = select_entry_path_aware(
+            &entries,
+            &exits[2],
+            &policy,
+            Some(&adv_bad),
+            |_| None,
+            NOW,
+            Some(&[1; 16]),
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(switched.exit_id, [2; 16], "beyond-margin challenger wins");
     }
 
     #[test]

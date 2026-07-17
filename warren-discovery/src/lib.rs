@@ -42,6 +42,7 @@ pub use multihop_directory::{
 pub use path_aware::{
     EntryPathQuality, LegQuality, PATH_QUALITY_DEGRADED_RTT_MS, PATH_QUALITY_VERSION,
     PathAwareParams, PathQualityAdvisory, pick_circuit_by_weight, select_circuit_path_aware,
+    select_entry_path_aware,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{
