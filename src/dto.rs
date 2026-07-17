@@ -964,6 +964,31 @@ pub struct ExitTelemetry {
     /// Clients still connected while this exit drains (ADR 36 §6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_clients_remaining: Option<u32>,
+    /// QUIC path stats of this node's live relay->exit forwarding legs,
+    /// labeled by destination exit. Only a dual-role node with pooled legs
+    /// reports them; `None` (off the wire) otherwise, so a legless
+    /// heartbeat stays byte-identical to the pre-legs format. Feeds the
+    /// unsigned `GET /v1/multihop/path-quality` advisory; infrastructure
+    /// legs only, no client identifiers (doc 52 invariant I2 style).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_legs: Option<Vec<RelayLegTelemetry>>,
+}
+
+/// One relay->exit forwarding leg of a dual-role node, as sampled from the
+/// pooled QUIC connection's path stats at heartbeat time. Counters are
+/// per-connection lifetime and reset when the pool re-dials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayLegTelemetry {
+    /// 32-char lowercase hex of the destination exit's id.
+    pub exit_id: String,
+    /// Smoothed path round-trip time, milliseconds.
+    pub rtt_ms: u32,
+    /// Current congestion window, bytes.
+    pub cwnd_bytes: u64,
+    /// Packets deemed lost on this connection so far.
+    pub lost_packets: u64,
+    /// Congestion (loss/ECN) events on this connection so far.
+    pub congestion_events: u64,
 }
 
 /// Go/no-go verdict of the exit's first-boot hardware qualification (doc 57).
@@ -2805,6 +2830,35 @@ pub struct TokenIssuerKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_telemetry_without_relay_legs_parses_and_stays_off_the_wire() {
+        let legacy = serde_json::to_string(&ExitTelemetry::default()).expect("serialize");
+        assert!(
+            !legacy.contains("relay_legs"),
+            "a heartbeat with no legs must be byte-identical to the pre-legs wire: {legacy}"
+        );
+        let parsed: ExitTelemetry =
+            serde_json::from_str(&legacy).expect("pre-legs heartbeat must parse");
+        assert!(parsed.relay_legs.is_none());
+    }
+
+    #[test]
+    fn exit_telemetry_relay_legs_roundtrip() {
+        let telemetry = ExitTelemetry {
+            relay_legs: Some(vec![RelayLegTelemetry {
+                exit_id: "aa".repeat(16),
+                rtt_ms: 28,
+                cwnd_bytes: 1_200_000,
+                lost_packets: 3,
+                congestion_events: 1,
+            }]),
+            ..ExitTelemetry::default()
+        };
+        let json = serde_json::to_string(&telemetry).expect("serialize");
+        let back: ExitTelemetry = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back.relay_legs, telemetry.relay_legs);
+    }
 
     #[test]
     fn invalid_pubkey_hex_error_redacts_the_value() {

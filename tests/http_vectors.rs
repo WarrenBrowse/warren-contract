@@ -197,6 +197,7 @@ fn exit_telemetry_shape() {
         nic_speed_mbps: Some(1_000),
         uptime_secs: 3_600,
         drain_clients_remaining: None,
+        relay_legs: None,
     };
     let v = json(&full);
     assert_eq!(
