@@ -50,8 +50,8 @@ pub use roster::{
 pub use selector::{SelectorError, WarrenRelaySelector};
 pub use signed::{
     JsonEgress, JsonEndpoint, JsonListener, JsonLocation, JsonNode, SIGNED_VERSION, SignedError,
-    SignedRelayList, VerifiedRelayList, sign_relay_list, verify_signed_relay_list,
-    verify_signed_relay_list_any,
+    SignedRelayList, VerifiedRelayList, sign_relay_list, unknown_signed_fields,
+    verify_signed_relay_list, verify_signed_relay_list_any,
 };
 
 /// Re-exports of the Warren types exposed by this crate's public API,

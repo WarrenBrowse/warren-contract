@@ -295,6 +295,20 @@ pub enum SignedError {
     /// canonical_bytes)`.
     #[error("signature verification failed")]
     BadSignature,
+    /// Signature does not verify AND the payload carries a field outside
+    /// the [`SIGNED_VERSION`] schema. The dominant cause is a signer
+    /// covering a new field without a version rotation (this verifier
+    /// cannot reconstruct the preimage), not a MITM: distinct from
+    /// [`Self::BadSignature`] so a fleet-wide schema skew is identifiable
+    /// from a single client log line.
+    #[error(
+        "signature verification failed over a payload with unknown field `{field}` (likely a new signed field emitted without a SIGNED_VERSION rotation)"
+    )]
+    BadSignatureUnknownField {
+        /// Schema path of the first unknown field, leaf redacted (the
+        /// name arrives in unauthenticated input).
+        field: String,
+    },
     /// Per-node parsing errors (invalid id / addr / family).
     #[error(transparent)]
     Relay(#[from] JsonError),
@@ -331,9 +345,88 @@ impl SignedError {
             Self::InvalidHex => "invalid-hex",
             Self::PubkeyNotOnCurve => "pubkey-not-on-curve",
             Self::BadSignature => "bad-signature",
+            Self::BadSignatureUnknownField { .. } => "bad-signature-unknown-field",
             Self::Relay(_) => "malformed-node",
             Self::InputTooLarge => "input-too-large",
         }
+    }
+}
+
+/// Serialized field paths of the SIGNED_VERSION == 10 relay-list schema
+/// (`[]` marks array elements). This is the emit/verify-side twin of the
+/// frozen canonical format: any field addition, even optional, changes the
+/// signed preimage for nodes that carry it, so extending this list is a
+/// wire break that requires rotating [`SIGNED_VERSION`], never a quiet
+/// edit.
+const SIGNED_V10_FIELDS: &[&str] = &[
+    "version",
+    "nodes",
+    "generation",
+    "signed_at",
+    "expires_at",
+    "server_pubkey_hex",
+    "signature_hex",
+    "nodes[].id",
+    "nodes[].exit_id",
+    "nodes[].location",
+    "nodes[].location.country",
+    "nodes[].location.city",
+    "nodes[].weight",
+    "nodes[].active",
+    "nodes[].egress",
+    "nodes[].egress.ipv4",
+    "nodes[].egress.ipv6",
+    "nodes[].endpoints",
+    "nodes[].endpoints[].addr",
+    "nodes[].endpoints[].family",
+    "nodes[].endpoints[].listeners",
+    "nodes[].endpoints[].listeners[].port",
+    "nodes[].endpoints[].listeners[].transport",
+    "nodes[].endpoints[].listeners[].alpn",
+    "nodes[].cover_domain",
+    "nodes[].port_forward",
+    "nodes[].tcp_fallback",
+];
+
+/// Field paths in a serialized relay list that are not part of the
+/// [`SIGNED_VERSION`]-covered schema, sorted and deduplicated (empty =
+/// fully covered). A non-empty result on an emitted list means the signer
+/// is about to cover a field deployed verifiers cannot reconstruct: every
+/// client would fail with a generic bad-signature, a silent fleet-wide
+/// directory outage. Signers must refuse to emit in that case; verifiers
+/// use it to turn that failure mode into a distinct, actionable error.
+#[must_use]
+pub fn unknown_signed_fields(payload: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_unknown_fields(payload, "", &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_unknown_fields(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if SIGNED_V10_FIELDS.contains(&child_path.as_str()) {
+                    collect_unknown_fields(child, &child_path, out);
+                } else {
+                    out.push(child_path);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let elem_path = format!("{path}[]");
+            for item in items {
+                collect_unknown_fields(item, &elem_path, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -394,6 +487,9 @@ pub fn sign_relay_list(
 /// - [`SignedError::InvalidHex`] / [`SignedError::PubkeyNotOnCurve`]:
 ///   invalid pubkey/signature format.
 /// - [`SignedError::BadSignature`]: signature does not verify.
+/// - [`SignedError::BadSignatureUnknownField`]: signature does not verify
+///   and the payload carries a field outside the [`SIGNED_VERSION`]
+///   schema (signer/client schema skew).
 /// - [`SignedError::Relay`]: a node has an invalid format.
 pub fn verify_signed_relay_list(
     s: &str,
@@ -451,7 +547,7 @@ pub fn verify_signed_relay_list_any(
     // signature equation.
     server_pubkey
         .verify_strict(&canonical, &signature)
-        .map_err(|_| SignedError::BadSignature)?;
+        .map_err(|_| classify_bad_signature(s))?;
 
     // Convert to a runtime WarrenRelayList.
     let relays: Result<Vec<_>, JsonError> =
@@ -463,6 +559,26 @@ pub fn verify_signed_relay_list_any(
         expires_at: signed.expires_at,
         server_pubkey_hex: signed.server_pubkey_hex,
     })
+}
+
+/// Refines a failed signature check with the unknown-field scan. Runs
+/// only on the failure path (the accept path is untouched, so an extra
+/// UNSIGNED field can never turn into a reject: forward compatibility is
+/// preserved). The input re-parses as JSON by construction here; a bare
+/// [`SignedError::BadSignature`] is kept if it somehow does not.
+fn classify_bad_signature(s: &str) -> SignedError {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(s) else {
+        return SignedError::BadSignature;
+    };
+    let unknown = unknown_signed_fields(&payload);
+    let Some(path) = unknown.first() else {
+        return SignedError::BadSignature;
+    };
+    let field = match path.rsplit_once('.') {
+        Some((prefix, leaf)) => format!("{prefix}.{}", warren_contract::redact(leaf)),
+        None => warren_contract::redact(path),
+    };
+    SignedError::BadSignatureUnknownField { field }
 }
 
 /// Builds a runtime [`WarrenRelay`] (node) from a wire [`JsonNode`].
@@ -1125,6 +1241,172 @@ mod tests {
         assert!(matches!(err, SignedError::UnsupportedVersion { got: 8 }));
     }
 
+    fn fully_populated_node() -> JsonNode {
+        let mut node = sample_node();
+        node.cover_domain = Some("cover.example.com".to_owned());
+        node.port_forward = Some(true);
+        node.tcp_fallback = Some(true);
+        node
+    }
+
+    #[test]
+    fn unknown_signed_fields_flags_fields_outside_the_v10_schema() {
+        // The exact fleet-outage shape: a signer whose structs grew a field
+        // (node-level, nested, or top-level) while SIGNED_VERSION stayed 10.
+        let key = fixed_server_key();
+        let signed = sign_relay_list(
+            vec![fully_populated_node()],
+            &key,
+            1,
+            1_700_000_000,
+            1_700_086_400,
+        );
+        let mut payload = serde_json::to_value(&signed).expect("to_value");
+        payload["nodes"][0]["daita"] = serde_json::Value::Bool(true);
+        payload["nodes"][0]["location"]["region"] = serde_json::Value::String("EU".to_owned());
+        payload["max_clients"] = serde_json::Value::from(10);
+
+        assert_eq!(
+            unknown_signed_fields(&payload),
+            vec!["max_clients", "nodes[].daita", "nodes[].location.region"],
+            "every field outside the v10 schema must be reported with its path"
+        );
+    }
+
+    #[test]
+    fn v10_schema_allowlist_exactly_covers_a_fully_populated_list() {
+        // Set equality both ways: a struct field missing from the allowlist
+        // would false-positive the emit guard on every signer; a stale
+        // allowlist entry no struct produces would mask a future collision.
+        fn collect_paths(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        let child_path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        collect_paths(child, &child_path, out);
+                        out.push(child_path);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        collect_paths(item, &format!("{path}[]"), out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let key = fixed_server_key();
+        let signed = sign_relay_list(
+            vec![fully_populated_node()],
+            &key,
+            1,
+            1_700_000_000,
+            1_700_086_400,
+        );
+        let payload = serde_json::to_value(&signed).expect("to_value");
+        let mut produced = Vec::new();
+        collect_paths(&payload, "", &mut produced);
+        produced.sort();
+        produced.dedup();
+
+        let mut allowlist: Vec<String> =
+            SIGNED_V10_FIELDS.iter().map(|s| (*s).to_owned()).collect();
+        allowlist.sort();
+        assert_eq!(
+            produced, allowlist,
+            "the v10 allowlist must match the serialized schema exactly; extending it is a wire break (bump SIGNED_VERSION)"
+        );
+    }
+
+    /// Emulates a signer whose SIGNED_VERSION == 10 preimage covers one
+    /// extra field this verifier does not know: the exact fleet-outage
+    /// shape the schema guard exists for.
+    fn future_signer_payload(key: &SigningKey, extra_field: &str) -> String {
+        let server_pubkey_hex = hex::encode(key.verifying_key().as_bytes());
+        let unsigned = UnsignedRelayList {
+            version: SIGNED_VERSION,
+            nodes: &[sample_node()],
+            generation: 1,
+            signed_at: 1_700_000_000,
+            expires_at: 1_700_086_400,
+            server_pubkey_hex: &server_pubkey_hex,
+        };
+        let mut payload = serde_json::to_value(&unsigned).expect("to_value");
+        payload["nodes"][0][extra_field] = serde_json::Value::Bool(true);
+        let canonical = serde_json::to_vec(&payload).expect("canonical");
+        payload["signature_hex"] =
+            serde_json::Value::String(hex::encode(key.sign(&canonical).to_bytes()));
+        serde_json::to_string(&payload).expect("serialize")
+    }
+
+    #[test]
+    fn future_signed_field_yields_the_distinct_schema_skew_error() {
+        let key = fixed_server_key();
+        let json = future_signer_payload(&key, "daita");
+
+        let err = verify_signed_relay_list(&json, None)
+            .expect_err("a preimage this verifier cannot reconstruct must fail");
+        assert!(
+            matches!(&err, SignedError::BadSignatureUnknownField { field } if field == "nodes[].daita"),
+            "schema skew must be distinct from a generic bad signature: {err:?}"
+        );
+        assert_eq!(err.reason_code(), "bad-signature-unknown-field");
+    }
+
+    #[test]
+    fn schema_skew_error_redacts_the_unknown_field_name() {
+        // The field name arrives in unauthenticated input, so it is log
+        // injection surface: only a short prefix may surface.
+        let key = fixed_server_key();
+        let json = future_signer_payload(&key, "x_padding_class_experimental");
+
+        let err = verify_signed_relay_list(&json, None).expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("x_padding_class_experimental"),
+            "full unknown field name must not surface: {msg}"
+        );
+        assert!(
+            msg.contains("nodes[].x_paddin"),
+            "redacted prefix kept for diagnosis: {msg}"
+        );
+    }
+
+    #[test]
+    fn unsigned_unknown_field_keeps_verifying() {
+        // Forward-compat invariant: an extra field NOT covered by the
+        // signature is ignored, never a reject. Hard-rejecting unknown
+        // fields (deny_unknown_fields) would black-hole every deployed
+        // client during a legitimate rolling upgrade; only the failure
+        // path may look at them.
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let mut payload = serde_json::to_value(&signed).expect("to_value");
+        payload["advisory"] = serde_json::Value::String("ignored".to_owned());
+        let json = serde_json::to_string(&payload).expect("serialize");
+
+        verify_signed_relay_list(&json, None)
+            .expect("an unsigned unknown field must not break verification");
+    }
+
+    #[test]
+    fn tampered_payload_without_unknown_fields_stays_a_plain_bad_signature() {
+        // The skew refinement must not reclassify an ordinary MITM tamper.
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let mut tampered = signed.clone();
+        tampered.nodes[0].weight = 999;
+        let json = serde_json::to_string(&tampered).expect("serialize");
+
+        let err = verify_signed_relay_list(&json, None).expect_err("tampered must fail");
+        assert!(matches!(err, SignedError::BadSignature), "got {err:?}");
+    }
+
     #[test]
     fn reason_code_is_distinct_and_secret_free_per_variant() {
         // The whole point of the category is to keep failure classes
@@ -1141,6 +1423,9 @@ mod tests {
             SignedError::InvalidHex,
             SignedError::PubkeyNotOnCurve,
             SignedError::BadSignature,
+            SignedError::BadSignatureUnknownField {
+                field: "nodes[].deadbeef".to_owned(),
+            },
             SignedError::Relay(JsonError::InvalidFamily("v6".to_owned())),
             SignedError::InputTooLarge,
         ];
