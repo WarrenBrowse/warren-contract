@@ -12,6 +12,8 @@
 //! - [`crate::env`]: shared environment-value parsing (lenient boolean knobs).
 //! - [`phase`]: the connection-phase reduction that decides the "protected"
 //!   green state, shared by the app and the browser extension.
+//! - [`killswitch`]: the kill-switch fail-state matrix (what the block must do
+//!   when its controller goes away), shared by every client.
 //! - [`fallback`]: the canonical anti-censorship HTTP fallback attempt
 //!   sequence.
 //!
@@ -23,6 +25,7 @@ pub mod auth;
 pub mod dto;
 pub mod env;
 pub mod fallback;
+pub mod killswitch;
 pub mod phase;
 pub mod product;
 pub mod release;
