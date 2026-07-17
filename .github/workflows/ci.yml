@@ -1,8 +1,9 @@
 name: CI
 
 # Runs exclusively on the WarrenBrowse org self-hosted runners (same policy as
-# warren-sdk-rs; label set matched against the provisioned Rust runner
-# macstudio-linux-rosetta). Do not switch to a GitHub-hosted runner.
+# warren-sdk-rs; verification only, so it runs on the native arm64 Linux fleet,
+# not the wedge-prone x86-under-Rosetta containers). Do not switch to a
+# GitHub-hosted runner.
 
 on:
   push:
@@ -25,7 +26,7 @@ concurrency:
 jobs:
   checks:
     name: fmt + clippy + test
-    runs-on: [self-hosted, Linux, X64, macstudio-rosetta]
+    runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
