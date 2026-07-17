@@ -26,6 +26,7 @@ jobs:
   checks:
     name: fmt + clippy + test
     runs-on: [self-hosted, Linux, X64, macstudio-rosetta]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # The root [patch] redirects the pinned warrenguard git deps to the
