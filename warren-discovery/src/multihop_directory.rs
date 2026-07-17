@@ -1755,9 +1755,9 @@ mod tests {
         // The dial target, SNI and the DIALED-HOP identity come from the entry;
         // only what the sealed frame needs (HPKE key, routing id) stays the
         // exit's. The ed25519 is the RPK / relay-auth identity of the hop we
-        // actually dial (the entry), NOT the exit: proven the hard way in
-        // real-network testing, where keeping the exit's ed25519 made the entry
-        // relay reject the circuit with "relay-auth signature does not match".
+        // actually dial (the entry), NOT the exit: keeping the exit's ed25519
+        // makes the entry relay reject the circuit with a relay-auth signature
+        // mismatch.
         assert_eq!(dialed.endpoint, de_entry.endpoint);
         assert_eq!(dialed.cover_domain, de_entry.cover_domain);
         assert_eq!(dialed.exit_id, exit.exit_id);

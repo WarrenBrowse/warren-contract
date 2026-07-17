@@ -542,8 +542,8 @@ mod tests {
         // The roster pins "Kassel" but the live relay advertises
         // "kassel": the city must be compared case-insensitively, the
         // same way the country already is (and the way query.rs matches
-        // a city). Byte-exact comparison caused a real kassel/Kassel
-        // outage. The relay MUST stay authorized.
+        // a city). Byte-exact comparison would drop the relay on a mere
+        // case difference. The relay MUST stay authorized.
         let key = admin_key();
         let signed = sign_roster(vec![entry(1, "de", "Kassel")], &key, 1, 1_000, 9_999);
         let roster = verify_roster(&serde_json::to_string(&signed).unwrap(), None).expect("verify");
