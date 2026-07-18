@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use super::multihop_directory::{
     CircuitPolicy, NodeEntry, VerifiedEntry, VerifiedExit, VerifiedMultiHopDirectory,
 };
+use super::rtt::RttCache;
 
 /// Version of the path-quality advisory wire format. The advisory is
 /// unsigned, so unknown fields are ignored and this version only gates
@@ -244,6 +245,29 @@ where
     } else {
         Some(incumbent)
     }
+}
+
+/// The single home of the store-to-selector keying for the flat entry view:
+/// a client-measured RTT is keyed by the entry's Ed25519 endpoint pubkey
+/// ([`VerifiedEntry::relay_ed25519_pubkey`], the pubkey the client dialed as
+/// its first hop). Pass the result as `entry_rtt_ms` to
+/// [`select_entry_path_aware`]; an empty store keeps today's behavior.
+pub fn entry_rtt_from(
+    cache: &RttCache,
+    now_unix: u64,
+    ttl_secs: u64,
+) -> impl Fn(&VerifiedEntry) -> Option<u32> + '_ {
+    move |e| cache.fresh_rtt_ms(e.relay_ed25519_pubkey, now_unix, ttl_secs)
+}
+
+/// [`entry_rtt_from`] for the pair view: the same keying over
+/// [`NodeEntry`]'s relay descriptor, for [`select_circuit_path_aware`].
+pub fn node_rtt_from(
+    cache: &RttCache,
+    now_unix: u64,
+    ttl_secs: u64,
+) -> impl Fn(&NodeEntry) -> Option<u32> + '_ {
+    move |n| cache.fresh_rtt_ms(n.relay.relay_ed25519_pubkey, now_unix, ttl_secs)
 }
 
 /// Fixed-point scale of the path factor `K/(K+cost)` so integer scoring
@@ -859,6 +883,77 @@ mod tests {
         )
         .unwrap();
         assert_eq!(switched.exit_id, [2; 16], "beyond-margin challenger wins");
+    }
+
+    #[test]
+    fn store_backed_rtt_biases_both_selection_views() {
+        // The measured store (15 ms to entry 2, 200 ms to entry 1) must
+        // steer both the pair view and the flat entry view through the ONE
+        // shared keying (entry Ed25519 pubkey), with no advisory at all.
+        let d = dir(vec![
+            node(1, "FI", 100),
+            node(2, "DE", 100),
+            node(3, "NL", 100),
+        ]);
+        let mut cache = RttCache::new();
+        cache.record([1; 32], 200, NOW);
+        cache.record([2; 32], 15, NOW);
+
+        let pairs = vec![(0, 2), (1, 2)];
+        assert_eq!(
+            select_circuit_path_aware(
+                &d,
+                &pairs,
+                None,
+                node_rtt_from(&cache, NOW, 600),
+                NOW,
+                None,
+                &PathAwareParams::default(),
+            ),
+            Some((1, 2))
+        );
+
+        let entries = d.entries();
+        let exits = d.exits();
+        let policy = super::super::multihop_directory::CircuitPolicy::for_directory(&d);
+        let picked = select_entry_path_aware(
+            &entries,
+            &exits[2],
+            &policy,
+            None,
+            entry_rtt_from(&cache, NOW, 600),
+            NOW,
+            None,
+            &PathAwareParams::default(),
+        )
+        .unwrap();
+        assert_eq!(picked.exit_id, [2; 16]);
+    }
+
+    #[test]
+    fn empty_store_keeps_selection_bit_identical_to_weight_pick() {
+        // The safety law of the client half: no measurement, no change.
+        let d = dir(vec![
+            node(1, "DE", 100),
+            node(2, "NL", 300),
+            node(3, "SG", 100),
+        ]);
+        let pairs: Vec<(usize, usize)> = (0..3)
+            .flat_map(|i| (0..3).filter(move |&j| j != i).map(move |j| (i, j)))
+            .collect();
+        let empty = RttCache::new();
+        assert_eq!(
+            select_circuit_path_aware(
+                &d,
+                &pairs,
+                None,
+                node_rtt_from(&empty, NOW, 600),
+                NOW,
+                None,
+                &PathAwareParams::default(),
+            ),
+            pick_circuit_by_weight(&d, &pairs)
+        );
     }
 
     #[test]

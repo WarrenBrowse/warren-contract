@@ -24,6 +24,7 @@ mod path_aware;
 mod query;
 mod relay;
 mod roster;
+mod rtt;
 mod selector;
 mod signed;
 
@@ -41,8 +42,8 @@ pub use multihop_directory::{
 };
 pub use path_aware::{
     EntryPathQuality, LegQuality, PATH_QUALITY_DEGRADED_RTT_MS, PATH_QUALITY_VERSION,
-    PathAwareParams, PathQualityAdvisory, pick_circuit_by_weight, select_circuit_path_aware,
-    select_entry_path_aware,
+    PathAwareParams, PathQualityAdvisory, entry_rtt_from, node_rtt_from, pick_circuit_by_weight,
+    select_circuit_path_aware, select_entry_path_aware,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{
@@ -53,6 +54,7 @@ pub use roster::{
     AuthorizeResult, ROSTER_VERSION, RosterEntry, RosterError, SignedRoster, VerifiedRoster,
     sign_roster, verify_roster, verify_roster_any,
 };
+pub use rtt::{DEFAULT_RTT_TTL_SECS, EndpointId, RttCache};
 pub use selector::{SelectorError, WarrenRelaySelector};
 pub use signed::{
     JsonEgress, JsonEndpoint, JsonListener, JsonLocation, JsonNode, SIGNED_VERSION, SignedError,
