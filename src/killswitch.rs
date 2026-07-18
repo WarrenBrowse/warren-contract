@@ -15,23 +15,27 @@
 //!
 //! # The unified matrix
 //!
-//! Only an explicit user intent may open the network. Every abnormal end of
-//! the controlling process (client crash, daemon stop, uncatchable kill) must
-//! leave the block HOLDING: a dying controller is precisely the moment traffic
-//! the user asked to protect would otherwise leak. A host reboot clears
-//! kernel firewall state, so it re-opens the network unless the user opted
-//! into lockdown mode (block-before-boot).
+//! Only a user-intended end may open the network: an explicit disconnect, a
+//! graceful daemon stop (a deliberate operator action), or a host reboot
+//! (which clears kernel firewall state anyway), and each of those still
+//! blocks when the user opted into lockdown mode. Every ABNORMAL end of the
+//! controlling process (client crash, uncatchable daemon kill) must leave the
+//! block HOLDING regardless of lockdown: a dying controller is precisely the
+//! moment traffic the user asked to protect would otherwise leak. A held
+//! block always comes with a recovery path (restart-reconcile or a manual
+//! escape) so fail-closed never means bricked.
 //!
 //! # Conformance status (recorded, not aspirational)
 //!
-//! - Desktop app: conforms (lockdown mode persists across daemon stop; the
-//!   blocking firewall holds on abnormal daemon end).
-//! - warrend (SDK desktop daemon): DIVERGES on [`KillswitchTrigger::OwnerConnectionLost`]
-//!   and [`KillswitchTrigger::DaemonShutdown`]: its RAII teardown restores the
-//!   firewall on any graceful end, trading a privacy fail-open for never
-//!   stranding the host without connectivity. Closing that gap needs a
-//!   recovery path (a way to lift a held block with no daemon running) and is
-//!   tracked as a follow-up; the divergence is deliberate until then.
+//! - Desktop app: conforms on every row (the disconnected/stop firewall reset
+//!   is lockdown-conditional; the blocking firewall holds on abnormal daemon
+//!   end; lockdown persists across reboot).
+//! - warrend (SDK desktop daemon): conforms on every row. Its clean-stop
+//!   teardown (explicit disconnect, SIGINT/SIGTERM) is lockdown-conditional,
+//!   and any abnormal end leaves the installed kernel ruleset holding.
+//!   Recovery from a held block: the next warrend start reconciles the stale
+//!   ruleset per user intent, and `warrend revert` lifts it with no daemon
+//!   running.
 //! - wclaude: per-process fail-closed by construction (no OS ruleset exists,
 //!   the wrapped process simply has no egress without the tunnel), so the
 //!   matrix rows about OS rule persistence do not apply to the host.
@@ -73,9 +77,15 @@ pub enum FailPosture {
 #[must_use]
 pub fn expected_posture(trigger: KillswitchTrigger, lockdown: bool) -> FailPosture {
     match trigger {
-        // Explicit intent, and the one case where no code can hold kernel
-        // state: both open the network unless the user opted into lockdown.
-        KillswitchTrigger::UserDisconnect | KillswitchTrigger::HostReboot => {
+        // User-intended ends (an explicit disconnect, a graceful daemon stop)
+        // and the one case where no code can hold kernel state (reboot): all
+        // open the network unless the user opted into lockdown. A graceful
+        // daemon stop is a deliberate operator action, so "stopped daemon"
+        // implies "traffic allowed" outside lockdown; this is the production
+        // desktop app's proven semantic.
+        KillswitchTrigger::UserDisconnect
+        | KillswitchTrigger::DaemonShutdown
+        | KillswitchTrigger::HostReboot => {
             if lockdown {
                 FailPosture::Blocking
             } else {
@@ -84,9 +94,9 @@ pub fn expected_posture(trigger: KillswitchTrigger, lockdown: bool) -> FailPostu
         }
         // Any abnormal end of the controller holds the block: that is exactly
         // when traffic the user asked to protect would otherwise leak.
-        KillswitchTrigger::OwnerConnectionLost
-        | KillswitchTrigger::DaemonShutdown
-        | KillswitchTrigger::DaemonKilled => FailPosture::Blocking,
+        KillswitchTrigger::OwnerConnectionLost | KillswitchTrigger::DaemonKilled => {
+            FailPosture::Blocking
+        }
     }
 }
 
@@ -105,7 +115,7 @@ mod tests {
             (UserDisconnect, true, Blocking),
             (OwnerConnectionLost, false, Blocking),
             (OwnerConnectionLost, true, Blocking),
-            (DaemonShutdown, false, Blocking),
+            (DaemonShutdown, false, Open),
             (DaemonShutdown, true, Blocking),
             (DaemonKilled, false, Blocking),
             (DaemonKilled, true, Blocking),
@@ -122,8 +132,8 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_user_intent_opens_the_network_outside_reboot() {
-        for trigger in [OwnerConnectionLost, DaemonShutdown, DaemonKilled] {
+    fn abnormal_controller_ends_always_block() {
+        for trigger in [OwnerConnectionLost, DaemonKilled] {
             for lockdown in [false, true] {
                 assert_eq!(
                     expected_posture(trigger, lockdown),
@@ -131,6 +141,23 @@ mod tests {
                     "an abnormal controller end must never expose traffic ({trigger:?})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lockdown_holds_the_block_on_every_trigger() {
+        for trigger in [
+            UserDisconnect,
+            OwnerConnectionLost,
+            DaemonShutdown,
+            DaemonKilled,
+            HostReboot,
+        ] {
+            assert_eq!(
+                expected_posture(trigger, true),
+                Blocking,
+                "lockdown mode must block no matter how the controller went away ({trigger:?})"
+            );
         }
     }
 }
