@@ -3,10 +3,10 @@
 //!
 //! # Why a directory (and why this trust shape)
 //!
-//! Single-hop clients fetch `/v1/exits` (server-signed) and cross-check
-//! it against an offline-admin-signed roster. Multi-hop needs more: the
-//! client must learn, for each node, the **operational-signed** relay and
-//! exit descriptors (`warrenguard_multihop::{RelayDescriptorSigned,
+//! The single-hop path fetches `/v1/exits` (server-signed) and
+//! cross-checks it against an offline-admin-signed roster. Multi-hop needs
+//! more: the client must learn, for each node, the **operational-signed**
+//! relay and exit descriptors (`warrenguard_multihop::{RelayDescriptorSigned,
 //! ExitDescriptorSigned}`) that bind the node's routing tag, Ed25519 RPK
 //! identity and HPKE X25519 key. Those descriptors are minted **offline**
 //! by the operational key; warren-api only stores and serves them.

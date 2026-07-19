@@ -1351,7 +1351,8 @@ pub struct AdminExitRow {
     /// 64-char hex of the exit's X25519 HPKE multi-hop recipient pubkey,
     /// if the exit published one on heartbeat. Consumed by the offline
     /// `wapi admin-publish-multihop-directory` tool to mint signed
-    /// multi-hop exit descriptors. `None` for legacy single-hop exits.
+    /// multi-hop exit descriptors. `None` for exits that published no
+    /// multi-hop key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_x25519_multihop_pubkey_hex: Option<String>,
     /// 2368-char hex of the exit's ML-KEM-768 encapsulation key (X-Wing

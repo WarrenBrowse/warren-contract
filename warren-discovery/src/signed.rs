@@ -97,7 +97,7 @@ use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 ///
 /// **v10 (TCP-fallback carrier capability)** adds the optional per-node
 /// `tcp_fallback`: whether the exit terminates the TLS-over-TCP anti-censorship
-/// carrier on `:443/tcp`. The single-hop client reads it (stamped onto
+/// carrier on `:443/tcp`. The client reads it (stamped onto
 /// [`WarrenExitAddr::tcp_fallback`](warrenguard_wire::WarrenExitAddr)) to decide
 /// whether a UDP-handshake timeout against this exit is worth retrying over TCP.
 /// Appended last on [`JsonNode`] (additive, `skip_serializing_if` when absent)
@@ -188,7 +188,7 @@ pub struct JsonNode {
     /// Node-level TLS-over-TCP fallback carrier capability (v10): `Some(true)` if
     /// the exit terminates the anti-censorship carrier on `:443/tcp`, `Some(false)`
     /// if explicitly disabled, `None` (skipped from the wire) if the exit binary
-    /// pre-dates the flag. The single-hop client only retries a blocked UDP
+    /// pre-dates the flag. The client only retries a blocked UDP
     /// handshake over TCP against an exit that advertises it. Added in v10; must
     /// stay last to preserve the canonical field order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
