@@ -2363,6 +2363,19 @@ pub struct AdminWithdrawalRow {
     /// Unix timestamp the request was processed, midnight-truncated;
     /// `None` while pending.
     pub processed_at: Option<u64>,
+    /// Crypto rail of the payment (`"bitcoin"`, `"lightning"`, `"monero"`,
+    /// `"polkadot"`, `"solana"`) for a self-service crypto refund request
+    /// declared by wpid (doc 91 section 6.4), when the wpid resolved to a
+    /// settled payment. `None` for the Stripe rail and omitted on its wire,
+    /// so card rows keep the historical shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rail: Option<String>,
+    /// Client-supplied crypto address the operator sends the refund to
+    /// (doc 91 section 6.4: the refund goes to an address the consumer
+    /// provides, never one Warren derives). Voluntarily-provided payment
+    /// data, same category as `payment_ref`; carries no identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_address: Option<String>,
 }
 
 /// Response for `GET /v1/admin/withdrawals`.
@@ -3029,6 +3042,42 @@ mod tests {
         assert_eq!(json, r#"{"expires_at":1700000000}"#);
         let parsed: MobilePaymentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn withdrawal_row_crypto_fields_default_none_and_are_omitted_when_absent() {
+        // Additive-field compat, both directions. A row from an older
+        // warren-api (Stripe-only queue, no crypto fields) must parse with
+        // both options off; a card-rail row serialized by a new server must
+        // stay byte-identical to the historical shape (no `rail`/
+        // `refund_address` keys), so nothing downstream sees a new field for
+        // the Stripe rail.
+        let legacy = r#"{"id":"ref1","payment_ref":"pi_a","status":"pending","created_at":1699920000,"processed_at":null}"#;
+        let parsed: AdminWithdrawalRow =
+            serde_json::from_str(legacy).expect("legacy JSON without crypto fields must parse");
+        assert_eq!(parsed.rail, None, "absent rail must default to None");
+        assert_eq!(
+            parsed.refund_address, None,
+            "absent refund_address must default to None"
+        );
+
+        let json = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            !json.contains("rail") && !json.contains("refund_address"),
+            "None crypto fields must be omitted so Stripe rows keep the historical shape: {json}"
+        );
+
+        let crypto = r#"{"id":"ref2","payment_ref":"00112233445566778899aabbccddeeff","status":"pending","created_at":1699920000,"processed_at":null,"rail":"monero","refund_address":"8xmrRefundAddr"}"#;
+        let parsed: AdminWithdrawalRow =
+            serde_json::from_str(crypto).expect("crypto row must parse");
+        assert_eq!(parsed.rail.as_deref(), Some("monero"));
+        assert_eq!(parsed.refund_address.as_deref(), Some("8xmrRefundAddr"));
+        let json = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            json.contains(r#""rail":"monero""#)
+                && json.contains(r#""refund_address":"8xmrRefundAddr""#),
+            "present crypto fields must round-trip: {json}"
+        );
     }
 
     #[test]
