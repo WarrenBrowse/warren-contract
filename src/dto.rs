@@ -2274,6 +2274,162 @@ pub struct AdminLedgerResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Admin: fiscal invoice register.
+// ---------------------------------------------------------------------------
+
+/// One fiscal register row for `GET /v1/admin/billing/invoices`.
+///
+/// Unlike every other admin surface, `customer_block` travels IN FULL
+/// here: a named invoice is an accounting document the buyer explicitly
+/// requested, and the operator's export needs it. Everything else is
+/// money math plus the opaque `txn_ref`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminFiscalInvoiceRow {
+    /// Yearly series, e.g. `"WB-2026"`.
+    pub series: String,
+    /// Gap-free number inside `series`.
+    pub number: i64,
+    /// `"invoice"` or `"credit_note"`.
+    pub doc_type: String,
+    /// Origin series, credit notes only.
+    pub origin_series: Option<String>,
+    /// Origin number, credit notes only.
+    pub origin_number: Option<i64>,
+    /// Issue date as midnight UTC Unix seconds (DATE precision).
+    pub issued_on: u64,
+    /// Service designation.
+    pub designation: String,
+    /// Uppercase ISO currency.
+    pub currency: String,
+    /// GROSS amount in minor units.
+    pub amount_minor: i64,
+    /// Taxing country (alpha-2, or `"ZZ"`).
+    pub vat_country: String,
+    /// Applied rate, basis points.
+    pub vat_rate_bps: u32,
+    /// VAT share of `amount_minor`.
+    pub vat_amount_minor: i64,
+    /// Applied regime (`"oss"`, `"franchise"`, `"b2b_reverse_charge"`, ...).
+    pub regime: String,
+    /// Opaque transaction reference (PSP ref or wpid).
+    pub txn_ref: String,
+    /// `true` when the row carries a customer block (named invoice).
+    pub named: bool,
+    /// Full buyer block of a named invoice (admin accounting surface
+    /// only), `None` on anonymous documents.
+    pub customer_block: Option<String>,
+    /// Location-evidence audit label (country codes only).
+    pub evidence: Option<String>,
+}
+
+/// Response for `GET /v1/admin/billing/invoices`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminFiscalInvoicesResponse {
+    /// Register rows in emission order, after filtering (a `limit`
+    /// keeps the most recent).
+    pub invoices: Vec<AdminFiscalInvoiceRow>,
+    /// Count of rows matching the filter (before any `limit`).
+    pub total: u64,
+}
+
+/// One per-(country, rate) aggregate line of the quarterly OSS register
+/// (`GET /v1/admin/billing/oss-register`). Credit notes enter all sums
+/// NEGATIVE, so the line is directly the return's net position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminOssRegisterLine {
+    /// Consumption country (alpha-2).
+    pub country: String,
+    /// Number of invoices in the aggregate.
+    pub invoice_count: u64,
+    /// Number of credit notes in the aggregate.
+    pub credit_note_count: u64,
+    /// Signed gross sum in minor units (credit notes negative).
+    pub gross_minor: i64,
+    /// Rate of this line, basis points (one line per country AND rate,
+    /// so a mid-quarter rate change yields two lines, as the OSS return
+    /// requires).
+    pub vat_rate_bps: u32,
+    /// Signed taxable base (gross minus VAT) in minor units.
+    pub taxable_base_minor: i64,
+    /// Signed VAT sum in minor units.
+    pub vat_minor: i64,
+}
+
+/// One document behind an OSS/UK aggregate line (audit detail).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminOssRegisterDetailRow {
+    /// Yearly series.
+    pub series: String,
+    /// Number inside `series`.
+    pub number: i64,
+    /// `"invoice"` or `"credit_note"`.
+    pub doc_type: String,
+    /// Consumption country.
+    pub country: String,
+    /// Issue date as midnight UTC Unix seconds.
+    pub issued_on: u64,
+    /// Signed gross amount, minor units (credit notes negative).
+    pub gross_minor: i64,
+    /// Signed VAT amount, minor units.
+    pub vat_minor: i64,
+    /// Location-evidence audit label.
+    pub evidence: Option<String>,
+}
+
+/// Response for `GET /v1/admin/billing/oss-register?quarter=YYYY-Qn`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOssRegisterResponse {
+    /// Echo of the requested quarter (`"2026-Q3"`).
+    pub quarter: String,
+    /// OSS (`regime = "oss"`) aggregate lines, country then rate order.
+    pub oss: Vec<AdminOssRegisterLine>,
+    /// Documents behind `oss`, emission order.
+    pub oss_detail: Vec<AdminOssRegisterDetailRow>,
+    /// UK (`regime = "uk"`) aggregate lines (separate return).
+    pub uk: Vec<AdminOssRegisterLine>,
+    /// Documents behind `uk`, emission order.
+    pub uk_detail: Vec<AdminOssRegisterDetailRow>,
+}
+
+/// One e-Factura outbox row for `GET /v1/admin/billing/efactura`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminEfacturaRow {
+    /// Referenced document series.
+    pub invoice_series: String,
+    /// Referenced document number.
+    pub invoice_number: i64,
+    /// Legal submission deadline as midnight UTC Unix seconds.
+    pub due_by: u64,
+    /// `"pending"` or `"sent"`.
+    pub status: String,
+    /// Failed submission attempts so far.
+    pub attempts: u32,
+    /// Scrubbed reason of the last failure.
+    pub last_error: Option<String>,
+    /// Provider reference of a sent document.
+    pub provider_ref: Option<String>,
+    /// Enqueue time, Unix seconds.
+    pub created_at: u64,
+    /// Submission time of a sent document, Unix seconds.
+    pub sent_at: Option<u64>,
+    /// `true` when the row is pending past its `due_by` day.
+    pub overdue: bool,
+}
+
+/// Response for `GET /v1/admin/billing/efactura`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminEfacturaResponse {
+    /// Outbox rows, oldest first.
+    pub rows: Vec<AdminEfacturaRow>,
+    /// Count of pending rows.
+    pub pending: u64,
+    /// Count of pending rows past their deadline.
+    pub overdue: u64,
+    /// Count of sent rows.
+    pub sent: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Admin: Stripe card refund (POST /v1/admin/subscribers/{pubkey}/stripe-refund).
 // ---------------------------------------------------------------------------
 
@@ -4259,6 +4415,87 @@ mod tests {
             resp.totals.is_empty(),
             "absent totals must default to empty, not fail parsing"
         );
+    }
+
+    #[test]
+    fn fiscal_invoice_admin_row_round_trips_with_customer_block() {
+        let row = AdminFiscalInvoiceRow {
+            series: "WB-2026".to_owned(),
+            number: 3,
+            doc_type: "invoice".to_owned(),
+            origin_series: None,
+            origin_number: None,
+            issued_on: 1_784_246_400,
+            designation: "Warren VPN subscription - 1 months".to_owned(),
+            currency: "EUR".to_owned(),
+            amount_minor: 700,
+            vat_country: "FR".to_owned(),
+            vat_rate_bps: 2000,
+            vat_amount_minor: 117,
+            regime: "oss".to_owned(),
+            txn_ref: "pi_x".to_owned(),
+            named: true,
+            customer_block: Some("Jane\n1 Main St\nPT".to_owned()),
+            evidence: Some("bin:FR".to_owned()),
+        };
+        let json = serde_json::to_string(&row).expect("serialize");
+        let back: AdminFiscalInvoiceRow = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, row, "the admin register row must round-trip");
+        assert!(
+            json.contains(r#""named":true"#),
+            "the named flag is on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn oss_register_response_pins_its_sections() {
+        let resp = AdminOssRegisterResponse {
+            quarter: "2026-Q3".to_owned(),
+            oss: vec![AdminOssRegisterLine {
+                country: "ES".to_owned(),
+                invoice_count: 2,
+                credit_note_count: 1,
+                gross_minor: 700,
+                vat_rate_bps: 2100,
+                taxable_base_minor: 579,
+                vat_minor: 121,
+            }],
+            oss_detail: vec![],
+            uk: vec![],
+            uk_detail: vec![],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        assert!(
+            json.starts_with(r#"{"quarter":"2026-Q3","oss":[{"country":"ES""#),
+            "wire shape is pinned: {json}"
+        );
+        let back: AdminOssRegisterResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.oss, resp.oss);
+    }
+
+    #[test]
+    fn efactura_response_round_trips_with_counts() {
+        let resp = AdminEfacturaResponse {
+            rows: vec![AdminEfacturaRow {
+                invoice_series: "WB-2026".to_owned(),
+                invoice_number: 4,
+                due_by: 1_784_246_400,
+                status: "pending".to_owned(),
+                attempts: 2,
+                last_error: Some("unavailable: timed out".to_owned()),
+                provider_ref: None,
+                created_at: 1_784_000_000,
+                sent_at: None,
+                overdue: true,
+            }],
+            pending: 1,
+            overdue: 1,
+            sent: 0,
+        };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let back: AdminEfacturaResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.rows, resp.rows);
+        assert_eq!((back.pending, back.overdue, back.sent), (1, 1, 0));
     }
 
     #[test]
