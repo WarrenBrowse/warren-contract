@@ -491,6 +491,32 @@ pub struct CheckResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Network environment endpoint.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/network` response. Public, unauthenticated descriptor of the
+/// environment this API serves, so the app and the website can label the
+/// deployment (beta vs production) and adapt what they expose without a
+/// client rebuild. Minimal by design; extend with optional fields only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkInfoResponse {
+    /// Environment name, e.g. `"beta"` or `"production"`.
+    pub environment: String,
+    /// `true` when the service is deliberately degraded (e.g. the
+    /// bandwidth-capped free beta). Clients surface the label; the
+    /// enforcement lives on the exits.
+    pub degraded: bool,
+    /// Default per-subscriber bandwidth cap in bits per second. Absent =
+    /// no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_rate_bps: Option<u64>,
+    /// `false` when this environment must not expose payment flows to
+    /// users (free beta). Payments stay configured server-side either
+    /// way.
+    pub payments_enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Subscription endpoints.
 // ---------------------------------------------------------------------------
 
@@ -506,7 +532,9 @@ pub struct CheckResponse {
 ///   key to bind.
 /// - `voucher_secret`: Crockford-32 voucher in dashed display form
 ///   `XXXX-XXXX-XXXX-XXXX` (19 chars) or raw 16-char form - the
-///   server normalizes both. 80 bits of entropy.
+///   server normalizes both. 80 bits of entropy. Optional: when absent,
+///   the server redeems its configured auto-voucher (beta onboarding);
+///   with no auto-voucher configured the request fails as unknown.
 /// - `referral_code`: optional `wref-<16hex>` code; when valid the
 ///   referrer receives a bonus extension on their own subscription.
 ///
@@ -514,7 +542,7 @@ pub struct CheckResponse {
 ///
 /// | Status | Meaning |
 /// |--------|---------|
-/// | 400 | Voucher unknown or malformed. |
+/// | 400 | Voucher unknown or malformed, or absent with no auto-voucher configured. |
 /// | 409 | Voucher already redeemed, or pubkey already registered. |
 /// | 410 | Voucher was cancelled by an admin. |
 /// | 429 | Rate limit exceeded on this endpoint. |
@@ -526,7 +554,11 @@ pub struct RegisterAccountRequest {
     /// form `XXXX-XXXX-XXXX-XXXX` and the raw 16-char form; the
     /// server normalizes via `warren_api::normalize_voucher_secret`
     /// before hashing. Crockford-32 alphabet, 80 bits of entropy.
-    pub voucher_secret: String,
+    /// `None` (omitted on the wire) asks the server to redeem its
+    /// configured auto-voucher for this pubkey; idempotent for a wallet
+    /// that already holds an active auto-voucher subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voucher_secret: Option<String>,
     /// Optional referral code (`wref-<16hex>`). Omitted from the wire
     /// when `None` to keep the serialized form compact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -537,8 +569,11 @@ impl fmt::Debug for RegisterAccountRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegisterAccountRequest")
             .field("pubkey_ss58", &self.pubkey_ss58)
-            // Redacted: the secret must never appear in logs.
-            .field("voucher_secret", &"<redacted>")
+            .field(
+                "voucher_secret",
+                // Presence is safe to log; the secret is withheld.
+                &self.voucher_secret.as_deref().map(|_| "<redacted>"),
+            )
             .field(
                 "referral_code",
                 // Presence is safe to log; the value is withheld.
@@ -577,7 +612,8 @@ pub struct SubscriptionResponse {
 
 /// `GET /v1/subscribers/active` response. Returned to exits polling for
 /// the current allowlist of authorized client pubkeys. Bumping
-/// `generation` is the canonical signal that the list has changed.
+/// `generation` is the canonical signal that the list has changed
+/// (a bandwidth-rate change bumps it too, so pollers re-fetch).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveSubscribersResponse {
     /// Monotonic counter from the subscription store. Strictly
@@ -590,6 +626,27 @@ pub struct ActiveSubscribersResponse {
     /// rejected at `serde_json::from_str` time, not at apply time on the
     /// exit's allowlist path.
     pub active_pubkeys: Vec<PubkeySs58>,
+    /// Default per-subscriber bandwidth cap in bits per second for this
+    /// environment (degraded beta). Absent = no cap. Exits apply it to
+    /// every subscriber without an entry in `rate_overrides`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_rate_bps: Option<u64>,
+    /// Per-wallet cap overrides (team exemptions, throttles). Absent =
+    /// none. May reference pubkeys outside `active_pubkeys`; exits
+    /// ignore those entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_overrides: Option<Vec<SubscriberRateOverride>>,
+}
+
+/// One per-wallet bandwidth override in
+/// [`ActiveSubscribersResponse::rate_overrides`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubscriberRateOverride {
+    /// Subscriber SS58 address (`wb…`).
+    pub pubkey_ss58: PubkeySs58,
+    /// Cap in bits per second. `0` = unlimited (exempt from the
+    /// default cap).
+    pub rate_bps: u64,
 }
 
 /// `GET /v1/subscribers/active?since_generation=N` response when the
@@ -618,6 +675,12 @@ pub struct SubscribersDeltaResponse {
     /// as `PubkeySs58` so a malformed pubkey is rejected at
     /// `serde_json::from_str` time, not at apply time.
     pub removed: Vec<PubkeySs58>,
+    /// Default per-subscriber bandwidth cap in bits per second, current
+    /// at serve time. Carried on every delta poll (stateless), so an
+    /// exit converges on a default-rate change within one poll even
+    /// when `added`/`removed` are empty. Absent = no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_rate_bps: Option<u64>,
 }
 
 /// One added entry in [`SubscribersDeltaResponse::added`]. We carry
@@ -629,6 +692,12 @@ pub struct SubscriberDeltaAdd {
     pub pubkey_ss58: PubkeySs58,
     /// Unix epoch seconds at which the subscription expires.
     pub expires_at: u64,
+    /// Per-wallet bandwidth cap override in bits per second. `0` =
+    /// unlimited (exempt). Absent = the environment default applies
+    /// (also how a cleared override propagates: the entry is re-sent
+    /// without the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_bps: Option<u64>,
 }
 
 /// Signed Certificate Revocation List. Polled separately
@@ -2090,6 +2159,64 @@ pub struct AdminPricingLadderBody {
 pub struct AdminPricingLadderResponse {
     /// Number of enabled tiers after the replace (== max_months).
     pub tiers: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Admin: network settings (environment label + bandwidth policy).
+// ---------------------------------------------------------------------------
+
+/// Response for `GET /v1/admin/network`: the environment identity
+/// (config-fixed) plus the runtime-mutable bandwidth policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminNetworkResponse {
+    /// Environment name served on `GET /v1/network`.
+    pub environment: String,
+    /// Degraded-service flag served on `GET /v1/network`.
+    pub degraded: bool,
+    /// Payments-exposure flag served on `GET /v1/network`.
+    pub payments_enabled: bool,
+    /// Current default per-subscriber cap in bits per second. Absent =
+    /// no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_rate_bps: Option<u64>,
+    /// Redacted identifier of the configured auto-voucher, e.g.
+    /// `"sha256:1a2b3c4d"` (truncated hash of the normalized secret).
+    /// Never the secret itself. Absent = no auto-voucher configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_voucher_fingerprint: Option<String>,
+    /// Every per-wallet override on file, for the admin panel listing.
+    #[serde(default)]
+    pub rate_overrides: Vec<AdminRateOverrideRow>,
+}
+
+/// One per-wallet override row in [`AdminNetworkResponse::rate_overrides`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminRateOverrideRow {
+    /// Subscriber SS58 address (`wb…`).
+    pub pubkey_ss58: PubkeySs58,
+    /// Cap in bits per second; `0` = unlimited (exempt).
+    pub rate_bps: u64,
+}
+
+/// Request body for `PUT /v1/admin/network`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminNetworkUpdateRequest {
+    /// New default per-subscriber cap in bits per second. `null` (or
+    /// absent) removes the cap. `0` is rejected with 400: the unlimited
+    /// marker is reserved for per-wallet overrides, use `null` here.
+    #[serde(default)]
+    pub default_rate_bps: Option<u64>,
+}
+
+/// Body of `PUT` and response of `GET`
+/// `/v1/admin/subscribers/{pubkey_ss58}/rate-limit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminRateLimit {
+    /// Cap in bits per second; `0` = unlimited (exempt from the default
+    /// cap); `null` = use the default policy (a PUT with `null` clears
+    /// the override).
+    #[serde(default)]
+    pub rate_bps: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

@@ -25,15 +25,78 @@ fn register_account_request_shape() {
     let addr = ss58::encode(&[0x11; 32]);
     let req = RegisterAccountRequest {
         pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
-        voucher_secret: "ABCD-EFGH-JKMN-PQRS".to_owned(),
+        voucher_secret: Some("ABCD-EFGH-JKMN-PQRS".to_owned()),
         referral_code: None,
     };
     assert_eq!(
         json(&req),
         serde_json::json!({ "pubkey_ss58": addr, "voucher_secret": "ABCD-EFGH-JKMN-PQRS" }),
-        "referral_code must be omitted when None"
+        "the with-voucher wire form must stay byte-identical to the pre-optional one"
     );
     roundtrips(&req);
+}
+
+#[test]
+fn register_account_request_omits_absent_voucher_secret() {
+    // Auto-voucher onboarding: the beta app registers with no code and
+    // the server redeems its configured campaign voucher.
+    let addr = ss58::encode(&[0x11; 32]);
+    let req = RegisterAccountRequest {
+        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+        voucher_secret: None,
+        referral_code: None,
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "pubkey_ss58": addr }),
+        "an absent voucher_secret must be omitted from the wire, not null"
+    );
+    roundtrips(&req);
+
+    let parsed: RegisterAccountRequest =
+        serde_json::from_value(serde_json::json!({ "pubkey_ss58": addr }))
+            .expect("a body without voucher_secret must deserialize");
+    assert_eq!(parsed.voucher_secret, None);
+}
+
+#[test]
+fn network_info_response_shape() {
+    let resp = NetworkInfoResponse {
+        environment: "beta".to_owned(),
+        degraded: true,
+        default_rate_bps: Some(20_000_000),
+        payments_enabled: false,
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "environment": "beta",
+            "degraded": true,
+            "default_rate_bps": 20_000_000u64,
+            "payments_enabled": false,
+        })
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn network_info_response_omits_absent_default_rate() {
+    let resp = NetworkInfoResponse {
+        environment: "production".to_owned(),
+        degraded: false,
+        default_rate_bps: None,
+        payments_enabled: true,
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "environment": "production",
+            "degraded": false,
+            "payments_enabled": true,
+        }),
+        "an uncapped environment must omit default_rate_bps"
+    );
+    roundtrips(&resp);
 }
 
 #[test]
@@ -489,7 +552,201 @@ fn register_account_request_tolerates_unknown_field() {
     });
     let parsed: RegisterAccountRequest = serde_json::from_value(raw)
         .expect("an unknown field must not break deserialization (tolerant reader)");
-    assert_eq!(parsed.voucher_secret, "ABCD-EFGH-JKMN-PQRS");
+    assert_eq!(
+        parsed.voucher_secret.as_deref(),
+        Some("ABCD-EFGH-JKMN-PQRS")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Subscribers feed: bandwidth-rate extensions. Old exits must keep parsing
+// (they ignore the new fields); new servers must stay byte-identical to the
+// legacy payload when the rate feature is unused.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn active_subscribers_response_legacy_payload_still_parses() {
+    let addr = ss58::encode(&[0x66; 32]);
+    let raw = serde_json::json!({
+        "generation": 7u64,
+        "now_unix_secs": 1_700_000_000u64,
+        "active_pubkeys": [addr],
+    });
+    let parsed: ActiveSubscribersResponse =
+        serde_json::from_value(raw).expect("a pre-rate payload must deserialize");
+    assert_eq!(parsed.default_rate_bps, None);
+    assert_eq!(parsed.rate_overrides, None);
+}
+
+#[test]
+fn active_subscribers_response_without_rates_matches_legacy_bytes() {
+    let addr = ss58::encode(&[0x66; 32]);
+    let resp = ActiveSubscribersResponse {
+        generation: 7,
+        now_unix_secs: 1_700_000_000,
+        active_pubkeys: vec![PubkeySs58::try_from(addr.clone()).unwrap()],
+        default_rate_bps: None,
+        rate_overrides: None,
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "generation": 7u64,
+            "now_unix_secs": 1_700_000_000u64,
+            "active_pubkeys": [addr],
+        }),
+        "unused rate fields must be absent, keeping the payload legacy-identical"
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn active_subscribers_response_carries_default_rate_and_overrides() {
+    let addr = ss58::encode(&[0x66; 32]);
+    let resp = ActiveSubscribersResponse {
+        generation: 8,
+        now_unix_secs: 1_700_000_000,
+        active_pubkeys: vec![PubkeySs58::try_from(addr.clone()).unwrap()],
+        default_rate_bps: Some(20_000_000),
+        rate_overrides: Some(vec![SubscriberRateOverride {
+            pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+            rate_bps: 0,
+        }]),
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "generation": 8u64,
+            "now_unix_secs": 1_700_000_000u64,
+            "active_pubkeys": [addr],
+            "default_rate_bps": 20_000_000u64,
+            "rate_overrides": [ { "pubkey_ss58": addr, "rate_bps": 0u64 } ],
+        }),
+        "rate_bps 0 is the on-wire unlimited (exempt) marker"
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn subscribers_delta_add_without_rate_matches_legacy_bytes() {
+    let addr = ss58::encode(&[0x77; 32]);
+    let add = SubscriberDeltaAdd {
+        pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+        expires_at: 1_700_086_400,
+        rate_bps: None,
+    };
+    assert_eq!(
+        json(&add),
+        serde_json::json!({ "pubkey_ss58": addr, "expires_at": 1_700_086_400u64 }),
+        "an entry on the default rate must serialize exactly as before"
+    );
+    roundtrips(&add);
+}
+
+#[test]
+fn subscribers_delta_response_carries_default_rate_and_per_entry_override() {
+    let addr = ss58::encode(&[0x77; 32]);
+    let resp = SubscribersDeltaResponse {
+        from_generation: 3,
+        to_generation: 5,
+        now_unix_secs: 1_700_000_000,
+        added: vec![SubscriberDeltaAdd {
+            pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+            expires_at: 1_700_086_400,
+            rate_bps: Some(0),
+        }],
+        removed: vec![],
+        default_rate_bps: Some(20_000_000),
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "from_generation": 3u64,
+            "to_generation": 5u64,
+            "now_unix_secs": 1_700_000_000u64,
+            "added": [ { "pubkey_ss58": addr, "expires_at": 1_700_086_400u64, "rate_bps": 0u64 } ],
+            "removed": [],
+            "default_rate_bps": 20_000_000u64,
+        })
+    );
+    roundtrips(&resp);
+
+    // A pre-rate delta payload must keep parsing.
+    let legacy = serde_json::json!({
+        "from_generation": 3u64,
+        "to_generation": 5u64,
+        "now_unix_secs": 1_700_000_000u64,
+        "added": [ { "pubkey_ss58": addr, "expires_at": 1_700_086_400u64 } ],
+        "removed": [],
+    });
+    let parsed: SubscribersDeltaResponse =
+        serde_json::from_value(legacy).expect("a pre-rate delta must deserialize");
+    assert_eq!(parsed.default_rate_bps, None);
+    assert_eq!(parsed.added[0].rate_bps, None);
+}
+
+// ---------------------------------------------------------------------------
+// Admin: network settings.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn admin_network_response_shape() {
+    let addr = ss58::encode(&[0x88; 32]);
+    let resp = AdminNetworkResponse {
+        environment: "beta".to_owned(),
+        degraded: true,
+        payments_enabled: false,
+        default_rate_bps: Some(20_000_000),
+        auto_voucher_fingerprint: Some("sha256:1a2b3c4d".to_owned()),
+        rate_overrides: vec![AdminRateOverrideRow {
+            pubkey_ss58: PubkeySs58::try_from(addr.clone()).unwrap(),
+            rate_bps: 0,
+        }],
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "environment": "beta",
+            "degraded": true,
+            "payments_enabled": false,
+            "default_rate_bps": 20_000_000u64,
+            "auto_voucher_fingerprint": "sha256:1a2b3c4d",
+            "rate_overrides": [ { "pubkey_ss58": addr, "rate_bps": 0u64 } ],
+        })
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn admin_network_update_request_null_clears_the_cap() {
+    let parsed: AdminNetworkUpdateRequest = serde_json::from_str(r#"{}"#).unwrap();
+    assert_eq!(
+        parsed.default_rate_bps, None,
+        "an absent default_rate_bps must parse as clear-the-cap"
+    );
+    let req = AdminNetworkUpdateRequest {
+        default_rate_bps: Some(20_000_000),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "default_rate_bps": 20_000_000u64 })
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn admin_rate_limit_shape() {
+    let set = AdminRateLimit {
+        rate_bps: Some(5_000_000),
+    };
+    assert_eq!(json(&set), serde_json::json!({ "rate_bps": 5_000_000u64 }));
+    roundtrips(&set);
+
+    let cleared: AdminRateLimit = serde_json::from_str(r#"{}"#).unwrap();
+    assert_eq!(
+        cleared.rate_bps, None,
+        "an absent rate_bps must parse as use-the-default-policy"
+    );
 }
 
 #[test]
