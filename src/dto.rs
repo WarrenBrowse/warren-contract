@@ -2685,10 +2685,20 @@ pub struct AdminWithdrawalRow {
 /// Response for `GET /v1/admin/withdrawals`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminWithdrawalsResponse {
-    /// All withdrawal requests in declaration order.
+    /// This page's withdrawal requests, newest declaration first.
     pub requests: Vec<AdminWithdrawalRow>,
-    /// Total request count.
+    /// Total requests matching the filter across every page (not just
+    /// this page's `requests.len()`), for the page-count UI.
     pub total: u64,
+    /// Zero-based offset this page started at, echoed back. Additive:
+    /// a server that pre-dates pagination omits it, so it defaults to 0
+    /// (a single unpaged page) for a client parsing an older response.
+    #[serde(default)]
+    pub offset: u64,
+    /// Page size that produced this response, echoed back. Same
+    /// additive-compat rule as `offset`.
+    #[serde(default)]
+    pub limit: u32,
 }
 
 /// Optional request body for `POST /v1/admin/withdrawals/{id}/refund`.
@@ -3437,6 +3447,37 @@ mod tests {
         assert_eq!(
             parsed.treasury_hint.as_deref(),
             Some("WarrenTreasuryAddr58")
+        );
+    }
+
+    #[test]
+    fn withdrawal_response_offset_and_limit_default_to_zero_on_legacy_json() {
+        // A server that pre-dates pagination emits only `requests` and
+        // `total`; a client built for the paginated wire must still parse
+        // it, with offset/limit defaulting to 0 (a single unpaged page).
+        let legacy = r#"{"requests":[],"total":3}"#;
+        let parsed: AdminWithdrawalsResponse =
+            serde_json::from_str(legacy).expect("legacy JSON without paging must parse");
+        assert_eq!(parsed.total, 3);
+        assert_eq!(parsed.offset, 0, "missing offset must default to 0");
+        assert_eq!(parsed.limit, 0, "missing limit must default to 0");
+    }
+
+    #[test]
+    fn withdrawal_response_offset_and_limit_round_trip() {
+        let page = AdminWithdrawalsResponse {
+            requests: vec![],
+            total: 120,
+            offset: 50,
+            limit: 50,
+        };
+        let json = serde_json::to_string(&page).expect("serialize");
+        let parsed: AdminWithdrawalsResponse = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.total, 120);
+        assert_eq!(
+            (parsed.offset, parsed.limit),
+            (50, 50),
+            "paging echoed back"
         );
     }
 
