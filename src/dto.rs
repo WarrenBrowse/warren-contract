@@ -2633,7 +2633,7 @@ pub struct WithdrawalAck {
 /// Holds only the payment reference and processing fields: no identity.
 /// The operator cross-references `payment_ref` in the Stripe dashboard to
 /// see the customer and issue the refund.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdminWithdrawalRow {
     /// Random reference id (also the Stripe refund idempotency key).
     pub id: String,
@@ -2659,6 +2659,27 @@ pub struct AdminWithdrawalRow {
     /// data, same category as `payment_ref`; carries no identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refund_address: Option<String>,
+    /// The sale's gross EUR amount (fiscal invoice `amount_minor`, minor
+    /// units), resolved server-side from `txn_ref = payment_ref`, so the
+    /// admin refund modal can state the amount to send without a second
+    /// lookup. `None` when no fiscal invoice was found for the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eur_amount_minor: Option<i64>,
+    /// Best-effort native crypto amount actually paid, pre-formatted with
+    /// its unit (e.g. `"0.00214500 BTC"`), resolved from the rail's
+    /// settlement record. `None` when that record already aged out (the
+    /// correlation stores carry a TTL of about 25h) or the lookup failed;
+    /// the admin UI then falls back to the EUR amount and a note to check
+    /// the original payment on the rail's explorer or wallet history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_amount_display: Option<String>,
+    /// The configured treasury address/account for this rail, when cheaply
+    /// resolvable server-side (the Solana treasury address, the Polkadot
+    /// master SS58). `None` for rails whose treasury lives in an external
+    /// wallet (BTCPay store, MoneroPay merchant wallet): the admin UI falls
+    /// back to a static per-rail label in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub treasury_hint: Option<String>,
 }
 
 /// Response for `GET /v1/admin/withdrawals`.
@@ -2684,6 +2705,18 @@ pub struct AdminWithdrawalRefundBody {
     /// 14-day withdrawal window. Defaults to `false` (window enforced).
     #[serde(rename = "override", default)]
     pub override_window: bool,
+    /// Operator's explicit confirmation, ticked in the admin modal's
+    /// checkbox, that the crypto refund was ALREADY sent manually to the
+    /// payout address. Mandatory (`true`) for a crypto (wpid) row, whose
+    /// refund path only records the outcome and cuts access; ignored on
+    /// the Stripe rail, which moves the money itself. Defaults to `false`
+    /// so an absent or legacy body never silently satisfies the guard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sent_confirmed: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// 422 body for `POST /v1/admin/withdrawals/{id}/refund` when the request
@@ -3364,6 +3397,50 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_row_refund_modal_fields_default_none_and_round_trip() {
+        // Additive-field compat for the amount/native/treasury facts the
+        // admin refund modal needs: absent on a legacy row, present and
+        // omitted-when-None like the other optional crypto fields.
+        let legacy = r#"{"id":"ref3","payment_ref":"pi_a","status":"pending","created_at":1699920000,"processed_at":null}"#;
+        let parsed: AdminWithdrawalRow =
+            serde_json::from_str(legacy).expect("legacy JSON without modal fields must parse");
+        assert_eq!(parsed.eur_amount_minor, None);
+        assert_eq!(parsed.native_amount_display, None);
+        assert_eq!(parsed.treasury_hint, None);
+        let json = serde_json::to_string(&parsed).expect("serialize");
+        assert!(
+            !json.contains("eur_amount_minor")
+                && !json.contains("native_amount_display")
+                && !json.contains("treasury_hint"),
+            "None modal fields must be omitted: {json}"
+        );
+
+        let full = AdminWithdrawalRow {
+            id: "ref4".to_owned(),
+            payment_ref: "00112233445566778899aabbccddeeff".to_owned(),
+            status: "pending".to_owned(),
+            created_at: 1_699_920_000,
+            processed_at: None,
+            rail: Some("solana".to_owned()),
+            refund_address: Some("SolAddr".to_owned()),
+            eur_amount_minor: Some(700),
+            native_amount_display: Some("0.050000000 SOL".to_owned()),
+            treasury_hint: Some("WarrenTreasuryAddr58".to_owned()),
+        };
+        let json = serde_json::to_string(&full).expect("serialize");
+        let parsed: AdminWithdrawalRow = serde_json::from_str(&json).expect("round-trip parse");
+        assert_eq!(parsed.eur_amount_minor, Some(700));
+        assert_eq!(
+            parsed.native_amount_display.as_deref(),
+            Some("0.050000000 SOL")
+        );
+        assert_eq!(
+            parsed.treasury_hint.as_deref(),
+            Some("WarrenTreasuryAddr58")
+        );
+    }
+
+    #[test]
     fn withdrawal_refund_body_override_defaults_false_and_uses_wire_name() {
         // The admin refund POST historically has an empty body: `{}` (and an
         // absent field) must keep override off so old callers never bypass
@@ -3383,6 +3460,38 @@ mod tests {
         assert_eq!(
             json, r#"{"override":true}"#,
             "the wire field must be named `override`"
+        );
+    }
+
+    #[test]
+    fn withdrawal_refund_body_sent_confirmed_defaults_false_on_legacy_json() {
+        // A body from an older warren-admin (pre-checkbox) has no
+        // `sent_confirmed` key at all: it must default to false, so the
+        // crypto refund guard fails closed rather than silently passing.
+        let legacy = r#"{"override":true}"#;
+        let parsed: AdminWithdrawalRefundBody = serde_json::from_str(legacy).expect("parse");
+        assert!(
+            !parsed.sent_confirmed,
+            "absent sent_confirmed must default to false (fail closed)"
+        );
+    }
+
+    #[test]
+    fn withdrawal_refund_body_sent_confirmed_round_trips_and_is_omitted_when_false() {
+        let confirmed = AdminWithdrawalRefundBody {
+            override_window: false,
+            sent_confirmed: true,
+        };
+        let json = serde_json::to_string(&confirmed).expect("serialize");
+        assert_eq!(json, r#"{"override":false,"sent_confirmed":true}"#);
+        let parsed: AdminWithdrawalRefundBody = serde_json::from_str(&json).expect("parse");
+        assert!(parsed.sent_confirmed);
+
+        let unconfirmed = AdminWithdrawalRefundBody::default();
+        let json = serde_json::to_string(&unconfirmed).expect("serialize");
+        assert_eq!(
+            json, r#"{"override":false}"#,
+            "sent_confirmed:false must stay omitted, like override's own historical shape"
         );
     }
 
