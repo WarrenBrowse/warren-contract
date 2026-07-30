@@ -20,6 +20,7 @@
 mod envelope;
 mod json_io;
 mod multihop_directory;
+mod notices;
 mod path_aware;
 mod query;
 mod relay;
@@ -39,6 +40,10 @@ pub use multihop_directory::{
     ensure_lossless_roundtrip, redact_exit_endpoints, sign_directory_draft,
     sign_multihop_directory, valid_circuits, verify_multihop_directory,
     verify_multihop_directory_any,
+};
+pub use notices::{
+    NOTICES_VERSION, NoticesError, SignedNotices, VerifiedNotices, sign_notices,
+    verify_signed_notices, verify_signed_notices_any,
 };
 pub use path_aware::{
     EntryPathQuality, LegQuality, PATH_QUALITY_DEGRADED_RTT_MS, PATH_QUALITY_VERSION,
@@ -61,6 +66,10 @@ pub use signed::{
     SignedRelayList, VerifiedRelayList, sign_relay_list, unknown_signed_fields,
     verify_signed_relay_list, verify_signed_relay_list_any,
 };
+// The notice DTO itself lives in the contract crate (one definition for the
+// backend and every SDK); re-exported because [`VerifiedNotices`] hands it
+// out, so a consumer has to be able to name it without a second dependency.
+pub use warren_contract::dto::{Notice, NoticeLevel};
 
 /// Re-exports of the Warren types exposed by this crate's public API,
 /// so callers (e.g. `mullvad-daemon`) can consume the selector without

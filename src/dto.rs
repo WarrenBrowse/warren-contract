@@ -2899,12 +2899,10 @@ pub struct Notice {
     pub expires_at: Option<u64>,
 }
 
-/// Response for `GET /v1/notices`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NoticesResponse {
-    /// Active notices (not expired).
-    pub notices: Vec<Notice>,
-}
+/// Longest notice message the API accepts. A broadcast banner has one
+/// line of room in the app; anything longer is truncated on screen, so it
+/// is refused at publication instead of shipped unreadable.
+pub const MAX_NOTICE_MESSAGE_LEN: usize = 500;
 
 /// Admin request body for `POST /v1/admin/notices`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2919,6 +2917,39 @@ pub struct AdminCreateNoticeRequest {
     pub max_client_version: Option<String>,
     /// Optional expiry unix timestamp.
     pub expires_at: Option<u64>,
+}
+
+/// One row of `GET /v1/admin/notices`: a stored notice plus the fields the
+/// public envelope has no reason to carry. Expired rows are included so
+/// the operator sees what a client stopped showing and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminNotice {
+    /// Server-assigned identifier, as accepted by
+    /// `DELETE /v1/admin/notices/{id}`.
+    pub id: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Severity level.
+    pub level: NoticeLevel,
+    /// Minimum client version this notice applies to.
+    pub min_client_version: Option<String>,
+    /// Maximum client version this notice applies to.
+    pub max_client_version: Option<String>,
+    /// Unix timestamp after which clients stop showing it.
+    pub expires_at: Option<u64>,
+    /// Unix timestamp the notice was published.
+    pub created_at: u64,
+}
+
+/// Response for `GET /v1/admin/notices`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminNoticesResponse {
+    /// Every stored notice, newest first, expired ones included.
+    pub notices: Vec<AdminNotice>,
+    /// Current monotonic generation, as served in the signed envelope.
+    /// Lets the operator confirm a publish or a delete actually moved the
+    /// version clients gate on.
+    pub generation: u64,
 }
 
 // ---------------------------------------------------------------------------
