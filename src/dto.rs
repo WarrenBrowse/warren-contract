@@ -1913,6 +1913,13 @@ pub struct ExitPortForwardMetrics {
     /// Allocate attempts refused because the port pool is full.
     #[serde(default)]
     pub exhausted_total: u64,
+    /// Allocate attempts that named an explicit external port the exit
+    /// could not grant, because another client holds it or it is still
+    /// in its post-release cooldown. This is the refusal a user reads as
+    /// "port in use", and the only one that leaves no other trace: it
+    /// touches neither the allocation table nor the backend rules.
+    #[serde(default)]
+    pub suggested_in_use_total: u64,
 }
 
 /// Body of `POST /v1/exits/port-forward/sync`. The exit signs the
@@ -3843,6 +3850,7 @@ mod tests {
                     quota_exceeded_total: 7,
                     rate_limited_total: 2,
                     exhausted_total: 5,
+                    suggested_in_use_total: 9,
                 },
             }],
             total: 1,
@@ -3859,6 +3867,23 @@ mod tests {
         );
         assert_eq!(parsed.metrics[0].metrics.quota_exceeded_total, 7);
         assert_eq!(parsed.metrics[0].metrics.rate_limited_total, 2);
+        assert_eq!(
+            parsed.metrics[0].metrics.suggested_in_use_total, 9,
+            "the refused-suggestion counter must survive the round-trip"
+        );
+    }
+
+    #[test]
+    fn exit_port_forward_metrics_tolerate_an_exit_without_the_refused_suggestion_counter() {
+        // Wire-compat: an exit predating the counter omits the field, and a
+        // fleet is never uniform mid-rollout. Missing must read as zero
+        // rather than fail the whole metrics push.
+        let raw = r#"{"allocations_total":3,"releases_total":1,"evictions_total":0,
+                      "quota_exceeded_total":0,"rate_limited_total":0,"exhausted_total":0}"#;
+        let parsed: ExitPortForwardMetrics =
+            serde_json::from_str(raw).expect("deserialize without the counter");
+        assert_eq!(parsed.allocations_total, 3);
+        assert_eq!(parsed.suggested_in_use_total, 0);
     }
 
     #[test]
