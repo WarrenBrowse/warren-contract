@@ -3087,6 +3087,73 @@ pub struct SessionOpenResponse {
     pub reason: Option<SessionRejectReason>,
 }
 
+/// `POST /v1/port-entitlements/spend` request body (exit -> API).
+///
+/// One entitlement buys one forwarded port. The exit verifies the credential
+/// offline, then spends it here so the cap is fleet-wide: a serial already
+/// spent on another exit is refused, which is what stops one subscriber from
+/// holding its whole budget on every node at once.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PortEntitlementSpendRequest {
+    /// Full Privacy Pass entitlement (base64url, no pad), as presented by
+    /// the client in the NAT-PMP credential trailer.
+    pub token_b64: String,
+    /// Exit spending it, for diagnostics and for the release path. An
+    /// operator label like `exit-sg-sin1`.
+    pub exit_id: String,
+}
+
+impl fmt::Debug for PortEntitlementSpendRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PortEntitlementSpendRequest")
+            // Redacted: a spendable bearer credential must never appear in a
+            // log, and unlike a session token it is worth a port to whoever
+            // reads it.
+            .field("token_b64", &"<redacted>")
+            .field("exit_id", &self.exit_id)
+            .finish()
+    }
+}
+
+/// `POST /v1/port-entitlements/spend` response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortEntitlementSpendResponse {
+    /// `true` when this entitlement now buys one port on this exit.
+    pub granted: bool,
+    /// Why it was refused. Absent on success, and absent from a server that
+    /// predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<PortEntitlementRejectReason>,
+}
+
+/// Why a port entitlement was refused (`granted == false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PortEntitlementRejectReason {
+    /// The serial is already spent, here or on another exit. The subscriber
+    /// is at its fleet-wide port budget.
+    AlreadySpent,
+    /// Does not verify under the current epoch's issuer key. Recovery: the
+    /// client presents an entitlement for the current epoch.
+    WrongEpoch,
+    /// Does not verify at all: not issued by this API, or malformed.
+    NotIssued,
+}
+
+/// `POST /v1/port-entitlements/release` request body (exit -> API).
+///
+/// Returns a spent entitlement to the subscriber's budget once the mapping it
+/// bought is gone, so moving a port costs nothing. The exit derives the
+/// serial offline from the credential it admitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortEntitlementReleaseRequest {
+    /// Entitlement serial being released (32 bytes, 64 lowercase hex).
+    pub serial_hex: String,
+    /// Exit releasing it, matching the spend.
+    pub exit_id: String,
+}
+
 /// `POST /v1/session/close` request body (graceful disconnect reported
 /// by the exit). Dual-shape like [`SessionOpenRequest`]: legacy closes
 /// by `(pubkey_ss58, device_id_hex)`, v2 closes by `(serial_hex,
@@ -4631,6 +4698,74 @@ mod tests {
             "Debug must redact the show-once clear token: {debug}"
         );
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn port_entitlement_spend_request_debug_redacts_the_token() {
+        // A spendable bearer credential must never reach a log, on any side.
+        let req = PortEntitlementSpendRequest {
+            token_b64: "c3VwZXItc2VjcmV0".to_owned(),
+            exit_id: "exit-sg-sin1".to_owned(),
+        };
+
+        let rendered = format!("{req:?}");
+
+        assert!(
+            !rendered.contains("c3VwZXItc2VjcmV0"),
+            "the token leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("exit-sg-sin1"), "context must survive");
+    }
+
+    #[test]
+    fn port_entitlement_spend_round_trips() {
+        let req = PortEntitlementSpendRequest {
+            token_b64: "dG9rZW4".to_owned(),
+            exit_id: "exit-sg-sin1".to_owned(),
+        };
+        let parsed: PortEntitlementSpendRequest =
+            serde_json::from_str(&serde_json::to_string(&req).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(parsed.token_b64, req.token_b64);
+        assert_eq!(parsed.exit_id, req.exit_id);
+    }
+
+    #[test]
+    fn a_granted_spend_needs_no_reason() {
+        // The reason is only there to explain a refusal; a server that omits
+        // it on success, or an older one that never sends it, must parse.
+        let parsed: PortEntitlementSpendResponse =
+            serde_json::from_str(r#"{"granted":true}"#).expect("deserialize");
+
+        assert!(parsed.granted);
+        assert_eq!(parsed.reason, None);
+    }
+
+    #[test]
+    fn a_refused_spend_names_a_reason_the_exit_can_act_on() {
+        let parsed: PortEntitlementSpendResponse =
+            serde_json::from_str(r#"{"granted":false,"reason":"already_spent"}"#)
+                .expect("deserialize");
+
+        assert!(!parsed.granted);
+        assert_eq!(
+            parsed.reason,
+            Some(PortEntitlementRejectReason::AlreadySpent)
+        );
+    }
+
+    #[test]
+    fn port_entitlement_release_round_trips() {
+        // Releasing is what stops a user who moves a port from burning an
+        // entitlement per change.
+        let req = PortEntitlementReleaseRequest {
+            serial_hex: "ab".repeat(32),
+            exit_id: "exit-sg-sin1".to_owned(),
+        };
+        let parsed: PortEntitlementReleaseRequest =
+            serde_json::from_str(&serde_json::to_string(&req).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(parsed.serial_hex, req.serial_hex);
     }
 
     #[test]
