@@ -28,9 +28,9 @@ that compiles on both sides can still break the wire.
 - **A DTO field, an enum variant, a header name and a signing-message layout are
   all frozen formats.** Adding a field is safe only if both sides tolerate the
   unknown; removing or renaming one is a `/v2`, never a mutation of `/v1`.
-- **Every frozen format has a golden vector** under `vectors/` and is replayed by
-  the SDK and by the backend. Never edit a vector to make a test pass. See the
-  shared wire-vectors rule.
+- **Every frozen format has a golden vector** under `vectors/`, replayed by both
+  the SDK and the backend, so a mismatch here breaks two implementations at once
+  (the shared wire-vectors rule, imported above, governs what to do about it).
 - **No product policy, no control-plane logic, no I/O.** This crate describes the
   contract; it does not decide anything. Anything that makes a decision belongs in
   `warren-core` (server side) or in the SDK (client side).
