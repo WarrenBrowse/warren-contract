@@ -3,12 +3,13 @@
 The **neutral client-to-server contract** shared by the private backend
 (`warren-core`) and every client SDK. It owns the SS58 address codec, the
 `X-Warren` canonical signing message plus its header names, the HTTP `/v1` DTOs,
-and the signed discovery envelopes (`warren-discovery`, including the exit roster
-and the operator notices).
+and the signed discovery envelopes (`warren-discovery-core`, including the exit
+roster and the operator notices).
 
-It depends only on `warrenguard-wire`. That is the whole point: both sides of the
-wire depend on this crate, so the contract cannot drift between the SDK and the
-backend.
+It depends only on the `warrenguard` engine crates: `warrenguard-wire` in the
+root crate, plus `warrenguard-multihop` in `warren-discovery-core`. That is the
+whole point: both sides of the wire depend on this crate, so the contract cannot
+drift between the SDK and the backend.
 
 > Shared Warren rules (single source of truth: WarrenBrowse/warren-workspace).
 > They resolve when this repo is checked out inside the workspace (mani sync);
@@ -28,15 +29,19 @@ that compiles on both sides can still break the wire.
 - **A DTO field, an enum variant, a header name and a signing-message layout are
   all frozen formats.** Adding a field is safe only if both sides tolerate the
   unknown; removing or renaming one is a `/v2`, never a mutation of `/v1`.
-- **Every frozen format has a golden vector** under `vectors/`, replayed by both
-  the SDK and the backend, so a mismatch here breaks two implementations at once
-  (the shared wire-vectors rule, imported above, governs what to do about it).
+- **Every frozen format has a golden vector**, replayed by both the SDK and the
+  backend, so a mismatch here breaks two implementations at once. The in-repo
+  freeze tests live under `tests/` (`http_vectors.rs`, `phase_vectors.rs`,
+  `fixtures/`); the cross-SDK corpus lives in the shared `warren-vectors` repo,
+  submoduled as `vectors/` in `warrenguard`, `warren-core` and the SDK repos
+  (the shared wire-vectors rule, imported above, governs what to do about a
+  mismatch).
 - **No product policy, no control-plane logic, no I/O.** This crate describes the
   contract; it does not decide anything. Anything that makes a decision belongs in
   `warren-core` (server side) or in the SDK (client side).
-- **No dependency beyond `warrenguard-wire` and crates.io.** A path-dep into a
-  consumer would invert the layering and break the standalone build that enforces
-  it.
+- **No dependency beyond the `warrenguard` engine crates and crates.io.** A
+  path-dep into a consumer would invert the layering and break the standalone
+  build that enforces it.
 
 ## Pin lockstep is gated in CI
 
