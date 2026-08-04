@@ -1,9 +1,7 @@
 name: CI
 
-# Runs exclusively on the WarrenBrowse org self-hosted runners (same policy as
-# warren-sdk-rs; verification only, so it runs on the native arm64 Linux fleet,
-# not the wedge-prone x86-under-Rosetta containers). Do not switch to a
-# GitHub-hosted runner.
+# Runs exclusively on the WarrenBrowse org self-hosted runners; do not switch
+# to a GitHub-hosted runner.
 
 on:
   push:
@@ -26,6 +24,9 @@ concurrency:
 jobs:
   anti-refrag:
     name: anti-refragmentation gate
+    # Self-hosted runners must never execute fork code: only same-repo events
+    # reach this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
     timeout-minutes: 10
     steps:
@@ -48,22 +49,22 @@ jobs:
           git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
       - uses: dtolnay/rust-toolchain@1.89.0
-      - name: single-home dependency-direction gate (doc 94 / doc 47 s5)
+      - name: single-home dependency-direction gate
         run: bash scripts/ci/anti-refrag.sh
 
   checks:
     name: fmt + clippy + test
+    # Self-hosted runners must never execute fork code: only same-repo events
+    # reach this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # The root [patch] redirects the pinned warrenguard git deps to the
       # sibling checkout, so CI clones it there at `.warrenguard-version`.
-      # ENGINE_TOKEN (repo PAT with Contents:read on WarrenBrowse/warrenguard)
-      # is optional: the org is on the free plan, so org-level secrets do not
-      # reach private repos. Without it we fall back to SSH, which the
-      # self-hosted runner already holds org credentials for (it fetches the
-      # warren-quinn ssh git dep for warren-sdk-rs the same way).
+      # ENGINE_TOKEN (Contents:read on WarrenBrowse/warrenguard) is optional;
+      # without it the clone falls back to SSH.
       - name: checkout warrenguard engine
         env:
           ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
