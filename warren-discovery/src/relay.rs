@@ -722,8 +722,8 @@ mod tests {
 
     #[test]
     fn endpoint_addr_is_derived_from_entry_listeners() {
-        let v4 = IpAddr::V4(Ipv4Addr::new(50, 7, 46, 90));
-        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0x49f0, 0xd086, 0x1003, 0, 0, 0, 2));
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 90));
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
         let n = node(
             vec![ingress(v4, &[443, 8443]), ingress(v6, &[443])],
             Vec::new(),
@@ -731,16 +731,16 @@ mod tests {
         let mut sockets: Vec<SocketAddr> = n.endpoint_addr().ip_addrs().collect();
         sockets.sort();
         assert_eq!(sockets.len(), 3, "2 (v4 ports) + 1 (v6 port) dial sockets");
-        assert!(sockets.contains(&"50.7.46.90:443".parse().unwrap()));
-        assert!(sockets.contains(&"50.7.46.90:8443".parse().unwrap()));
-        assert!(sockets.contains(&"[2001:49f0:d086:1003::2]:443".parse().unwrap()));
+        assert!(sockets.contains(&"192.0.2.90:443".parse().unwrap()));
+        assert!(sockets.contains(&"192.0.2.90:8443".parse().unwrap()));
+        assert!(sockets.contains(&"[2001:db8::2]:443".parse().unwrap()));
     }
 
     #[test]
     fn egress_capability_is_derived_from_exit_egress_families() {
         // v4 + v6 egress addresses -> both capabilities; supports a
         // v6-only-egress exit too.
-        let v4 = IpAddr::V4(Ipv4Addr::new(50, 7, 46, 90));
+        let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 90));
         let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
 
         let dual = node(Vec::new(), vec![exit_egress(&[v4, v6])]);
