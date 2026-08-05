@@ -1822,6 +1822,12 @@ pub struct AdminPortForwardRow {
     pub exit_pubkey_ss58: PubkeySs58,
     /// Allocated port.
     pub port: u16,
+    /// Transport the port was allocated for. Without it, an allocation
+    /// held on both TCP and UDP renders as two identical rows and reads
+    /// as a duplicate. `#[serde(default)]` keeps wire-compat with
+    /// servers that pre-date the field.
+    #[serde(default)]
+    pub proto: Option<PortForwardProto>,
     /// Unix epoch of expiry.
     pub expires_at: u64,
     /// Unix epoch at which the hosting exit assembled the snapshot
