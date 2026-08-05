@@ -1706,6 +1706,35 @@ pub struct AdminCreditsPageResponse {
     pub limit: u32,
 }
 
+/// One day of a campaign voucher's consumption.
+///
+/// The redemption gate stores a domain-separated hash of the account
+/// and a day-truncated timestamp, so a day bucket is the finest grain
+/// that exists server-side. This DTO carries the bucket and nothing
+/// else: there is no account handle to carry, by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminVoucherRedemptionDay {
+    /// Calendar day, `YYYY-MM-DD` (UTC).
+    pub day: String,
+    /// Distinct accounts that consumed the voucher that day.
+    pub count: u64,
+}
+
+/// Response for `GET /v1/admin/vouchers/{secret_hash_hex}/redemptions`:
+/// the per-day consumption of one campaign voucher, oldest day first.
+///
+/// Aggregate counts only. The gate rows behind them are purged once the
+/// campaign deadline passes (retention R8), so a reader that needs the
+/// history past that date must have kept its own copy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminVoucherRedemptionsResponse {
+    /// Day buckets, ascending. Days with no redemption are absent
+    /// rather than zero-filled.
+    pub days: Vec<AdminVoucherRedemptionDay>,
+    /// Accounts summed across every bucket.
+    pub total: u64,
+}
+
 /// Response for `GET /v1/admin/subscribers/{pubkey_ss58}` - the
 /// server-side join behind the subscriber detail page: the subscription
 /// itself, every credit that funded it, and its active port-forwards.
@@ -3781,6 +3810,37 @@ mod tests {
             parsed.total, 0,
             "missing `total` must deserialize to 0 to keep wire-compat with older servers"
         );
+    }
+
+    #[test]
+    fn voucher_redemptions_response_carries_counts_and_no_account_handle() {
+        // The whole point of the endpoint: a campaign's shape over time
+        // without ever naming who redeemed it. If a field ever appears
+        // here that can identify an account, this test is the tripwire.
+        let raw = r#"{"days":[{"day":"2026-08-05","count":12},{"day":"2026-08-06","count":31}],"total":43}"#;
+        let parsed: AdminVoucherRedemptionsResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.total, 43);
+        assert_eq!(
+            parsed.days,
+            vec![
+                AdminVoucherRedemptionDay {
+                    day: "2026-08-05".to_owned(),
+                    count: 12
+                },
+                AdminVoucherRedemptionDay {
+                    day: "2026-08-06".to_owned(),
+                    count: 31
+                },
+            ]
+        );
+
+        let round = serde_json::to_string(&parsed).unwrap();
+        for banned in ["pubkey", "hash", "account", "ss58"] {
+            assert!(
+                !round.contains(banned),
+                "serialized shape must expose no account handle, found {banned} in {round}"
+            );
+        }
     }
 
     #[test]
