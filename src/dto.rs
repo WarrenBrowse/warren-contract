@@ -3919,6 +3919,7 @@ mod tests {
                 exit_pubkey_ss58: PubkeySs58::try_from(crate::ss58::encode(&[0xee; 32]))
                     .expect("valid SS58"),
                 port: 49200,
+                proto: Some(PortForwardProto::Tcp),
                 expires_at: 1_700_003_600,
                 exit_last_sync_unix_secs: Some(1_700_000_000),
             }],
