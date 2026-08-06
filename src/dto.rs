@@ -1811,11 +1811,14 @@ impl fmt::Debug for AdminCreateVoucherResponse {
 /// Admin row of one port-forward allocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminPortForwardRow {
-    /// Owning client pubkey. `None` when the exit pushed the
-    /// snapshot before its tunnel session map had resolved the
-    /// (IPv4 -> pubkey) mapping for this internal IP, or when the
-    /// mapping has been torn down between allocation and capture.
-    /// The admin UI renders such rows as "unknown".
+    /// Owning client pubkey. Always `None` from a current exit, which
+    /// deliberately never resolves a forwarded port to an account:
+    /// nftables DNAT keys on the tunnel inner IPv4 alone, so binding the
+    /// port to a wallet would build the exact `pubkey <-> exit <-> port`
+    /// correlation the anonymous-session design exists to remove. The
+    /// field stays on the wire for the snapshots that pre-date that
+    /// design; a UI rendering `None` must read it as policy, never as a
+    /// lookup that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_pubkey_ss58: Option<PubkeySs58>,
     /// Hosting exit signing identity, as a Warren SS58 address (`wb…`).
