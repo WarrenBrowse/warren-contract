@@ -61,6 +61,14 @@ is a simultaneous change to every client and to the backend.
 - Never log or embed a full pubkey, an address or a nonce (shared no-log rule).
 - The SS58 codec is checksummed and network-prefixed: a change to the prefix is an
   identity-format change, so it is a schema bump with new vectors, never a patch.
+- **The canonical message carries no audience, so a PATH is a service
+  reservation.** It is method, path, timestamp, nonce and body hash: no host, no
+  service name. A signature is therefore valid at any Warren service that serves
+  that path, and two services sharing one would make their signed requests
+  interchangeable. Today `POST /v1/forum/*` belongs to warren-connect (the forum
+  SSO broker) and warren-api serves only the unsigned `GET /v1/forum/digest`;
+  keep it that way. Adding an audience field is the real fix and it is a `/v2`,
+  because every deployed client signs the current layout.
 
 ## Verify before commit
 
