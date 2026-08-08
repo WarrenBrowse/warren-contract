@@ -18,6 +18,7 @@
 //! state machine calls the Warren backend when selected.
 
 mod envelope;
+mod forum_digest;
 mod json_io;
 mod multihop_directory;
 mod notices;
@@ -33,6 +34,11 @@ mod signed;
 #[cfg(feature = "test-helpers")]
 pub use multihop_directory::test_helpers;
 
+pub use forum_digest::{
+    FORUM_DIGEST_VERSION, ForumDigestError, SignedForumDigest, UNREAD_SATURATED,
+    VerifiedForumDigest, pack_unread_counts, sign_forum_digest, verify_forum_digest,
+    verify_forum_digest_any,
+};
 pub use json_io::JsonError;
 pub use multihop_directory::{
     CircuitPolicy, DirectoryError, MULTIHOP_DIRECTORY_VERSION, MultiHopDirectoryDraft, NodeEntry,
