@@ -155,6 +155,18 @@ impl VerifiedForumDigest {
         self.counts_hex.len()
     }
 
+    /// The verified counts, in their wire form.
+    ///
+    /// Exists because verification and slot lookup can live in different
+    /// processes: the Warren desktop app verifies in its privileged daemon
+    /// and reads the slot in the renderer, which is the only place that
+    /// knows which slot is the user's. The caller still owes the freshness
+    /// check that [`Self::unread_for`] applies for it.
+    #[must_use]
+    pub fn counts_hex(&self) -> &str {
+        &self.counts_hex
+    }
+
     /// Unread count for `slot`, capped at [`UNREAD_SATURATED`].
     ///
     /// Zero once the document is stale (anti-freeze), and zero for a slot
@@ -355,6 +367,19 @@ mod tests {
             "a neighbouring slot must not bleed into another account's badge"
         );
         assert_eq!(verified.slots(), 4, "the string length is the slot count");
+    }
+
+    #[test]
+    fn the_verified_counts_can_be_handed_to_another_process_to_index() {
+        let json = signed_json(&[0, 3, 15], 1);
+
+        let verified = verify_forum_digest(&json, Some(&pin())).expect("must verify");
+
+        assert_eq!(
+            verified.counts_hex(),
+            "03f",
+            "a client that verifies and a client that indexes may be different processes"
+        );
     }
 
     #[test]
