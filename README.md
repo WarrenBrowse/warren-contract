@@ -3,7 +3,7 @@
 The neutral client<->server contract shared by the Warren client SDK
 (`warren-sdk-rs`) and the Warren backend (`warren-core`), so the wire contract
 cannot drift between them. Warren is a privacy-focused VPN service:
-<https://warrenbrowse.com>.
+<https://warren.ro>.
 
 - `ss58`: the wallet-identity address codec (Warren prefix `13295`, `wb…`).
 - `auth`: the X-Warren canonical signing message, the client-side signer, and
