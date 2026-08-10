@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/warren-logo.svg" alt="Warren" width="130"/>
+</p>
+
 # warren-contract
 
 The neutral client<->server contract shared by the Warren client SDK
