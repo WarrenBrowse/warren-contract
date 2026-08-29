@@ -253,6 +253,7 @@ fn exit_telemetry_shape() {
         quic_lost_packets_total: 5,
         quic_congestion_events_total: 6,
         cpu_percent: Some(37.5),
+        steal_percent: Some(0.5),
         mem_rss_bytes: Some(52_428_800),
         load1_milli: Some(410),
         nic_tx_bytes_total: Some(1_000),
@@ -268,6 +269,11 @@ fn exit_telemetry_shape() {
         "cumulative counters are plain u64 fields"
     );
     assert_eq!(v["rtt_p50_ms"], 12);
+    // Steal is carried beside cpu_percent, never folded into it: cpu_percent
+    // is derived from idle, so a node starved by its hypervisor reads as busy
+    // there and only this field can tell the two apart.
+    assert_eq!(v["steal_percent"], 0.5);
+    assert_eq!(v["cpu_percent"], 37.5, "the two are independent gauges");
     assert_eq!(
         v.get("drain_clients_remaining"),
         None,
@@ -280,6 +286,11 @@ fn exit_telemetry_shape() {
     let v = json(&sparse);
     assert_eq!(v["bytes_tx_total"], 0);
     assert_eq!(v.get("cpu_percent"), None, "None system gauges are omitted");
+    assert_eq!(
+        v.get("steal_percent"),
+        None,
+        "an exit binary predating steal_percent omits it, so the wire is unchanged for old nodes"
+    );
     roundtrips(&sparse);
 }
 

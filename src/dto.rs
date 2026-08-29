@@ -1010,8 +1010,25 @@ pub struct ExitTelemetry {
     /// Congestion events, summed over live connections.
     pub quic_congestion_events_total: u64,
     /// Whole-box CPU utilisation percentage over the last sample tick.
+    ///
+    /// This counts STOLEN time as busy, because it is derived from the idle
+    /// fraction of `/proc/stat`. Read it beside `steal_percent`: a node whose
+    /// hypervisor is preempting it reports a high `cpu_percent` and looks like
+    /// it is working hard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<f32>,
+    /// Percentage of the last sample tick the hypervisor spent running someone
+    /// else while this guest had work to do (`steal` in `/proc/stat`).
+    ///
+    /// Zero on bare metal and on an uncontended host; a sustained non-zero
+    /// reading means the node is being starved by its provider rather than by
+    /// its own load, which is invisible in every other counter here. Added
+    /// after 2026-08-29, where the API host was frozen in multi-second bursts
+    /// (steal to 25.6 %) and no Warren metric anywhere could express it.
+    ///
+    /// `None` from an exit binary that predates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steal_percent: Option<f32>,
     /// Resident set size of the exit process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_rss_bytes: Option<u64>,
