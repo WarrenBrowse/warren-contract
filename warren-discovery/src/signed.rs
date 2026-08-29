@@ -107,6 +107,20 @@ use crate::{Addr, Ingress, Listener, Location, WarrenRelay, WarrenRelayList};
 /// `vectors/relays.json`.
 pub const SIGNED_VERSION: u32 = 10;
 
+/// Schema version served on `GET /v2/exits`.
+///
+/// v10 is **frozen and still served on `/v1/exits`**, byte for byte. Client
+/// verification is a strict equality (`signed.version != expected`), with no
+/// negotiation, so mutating v10 in place would fail every installed client the
+/// moment its cache expired: a silent, fleet-wide directory outage. A second
+/// route carrying a second version is the only additive shape available, and
+/// clients migrate route by route across their own releases.
+///
+/// v11 = v10 plus six optional node fields (see [`JsonNode`]). Because they are
+/// all `skip_serializing_if`, a v10 emission with them unset is byte-identical
+/// to a pre-v11 one, which is what lets one `JsonNode` serve both schemas.
+pub const SIGNED_VERSION_V2: u32 = 11;
+
 /// **Wire** dial listener: a `port` plus the wire `transport` and the
 /// `alpn` token offered in the handshake. The app surfaces
 /// `(transport, alpn)` as a selectable connection type / obfuscation.
@@ -193,6 +207,62 @@ pub struct JsonNode {
     /// stay last to preserve the canonical field order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_fallback: Option<bool>,
+
+    // ---- v11 (`/v2/exits` only). Every field below is optional and
+    // `skip_serializing_if`, so a v10 emission omits all of them and
+    // reproduces its canonical bytes exactly. They are declared after
+    // `tcp_fallback` to keep the v10 canonical field order intact.
+    //
+    // All six names are in `SIGNED_V11_FIELDS` from day one even though only
+    // the two liveness fields are populated today. That is deliberate: a
+    // signed schema is frozen, so appending the naming fields later would
+    // force a v12. Reserving the names now costs nothing (an absent optional
+    // field changes no bytes) and buys the fleet-naming work a landing spot
+    // that needs no further rotation.
+    /// Unix second of this node's last heartbeat, on the SERVER's clock.
+    ///
+    /// Absolute, never an age. The list is cached (ETag on `generation`, and
+    /// clients hold it for hours), so a relative age would be frozen at
+    /// signing time and become a lie the moment the document is reused. Read
+    /// it against [`SignedRelayList::signed_at`], which is in the same signed
+    /// document and on the same clock: `signed_at - last_seen_unix` is the
+    /// node's staleness at signing, computable with no reference to the
+    /// client's own clock. That matters: 2026-08-18 refused 100 % of one
+    /// day's mobile logins over device clocks more than 60 s off, and a
+    /// freshness rule that consulted the client clock would reopen that class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_unix: Option<u64>,
+    /// The server's own verdict that this node is past its heartbeat TTL.
+    ///
+    /// Redundant with `last_seen_unix` on purpose: it saves every client
+    /// hardcoding `EXIT_HEARTBEAT_TTL_SECS`, and it keeps the TTL a server
+    /// policy rather than a constant duplicated into three SDKs.
+    ///
+    /// A stale node is a DIAGNOSTIC, never a candidate. It exists so a client
+    /// can tell "this exit aged out of a liveness TTL" from "this exit was
+    /// decommissioned", which plain absence cannot express, and which on
+    /// 2026-08-29 turned a stalled API host into a host-wide kill-switch
+    /// block. Selecting one would replace a fail-closed block with a
+    /// fail-slow dial, which is worse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    /// Hosting provider letter of the fleet naming scheme (`m` m247,
+    /// `f` flokinet, `h` hetzner, ...). Reserved; populated once nodes report
+    /// it through their manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Virtualization letter (`v` virtual, `c` container, `d` dedicated,
+    /// `r` raspberry). Reserved; see `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virt: Option<String>,
+    /// Three-letter city code (`par`, `ams`, `fsn`), which cannot be derived
+    /// from `location.city` (`fsn` is a datacenter code, not an IATA one).
+    /// Reserved; see `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city_code: Option<String>,
+    /// Per-location index of the node. Reserved; see `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_index: Option<u32>,
 }
 
 /// **Signed** node list (full wire format, `relays.json` v10).
@@ -388,6 +458,28 @@ const SIGNED_V10_FIELDS: &[&str] = &[
     "nodes[].tcp_fallback",
 ];
 
+/// Serialized field paths of the [`SIGNED_VERSION_V2`] schema: every v10
+/// path plus the six appended in v11.
+///
+/// Deliberately declared as v10 + a delta rather than a second hand-written
+/// list: the two must never disagree about a shared field, and a copy is how
+/// they would. The four naming paths are reserved here before anything emits
+/// them, so the fleet-naming work lands without a further rotation.
+const SIGNED_V11_EXTRA_FIELDS: &[&str] = &[
+    "nodes[].last_seen_unix",
+    "nodes[].stale",
+    "nodes[].provider",
+    "nodes[].virt",
+    "nodes[].city_code",
+    "nodes[].node_index",
+];
+
+/// Whether `path` is covered by the schema of `version`.
+fn field_is_covered(version: u32, path: &str) -> bool {
+    SIGNED_V10_FIELDS.contains(&path)
+        || (version == SIGNED_VERSION_V2 && SIGNED_V11_EXTRA_FIELDS.contains(&path))
+}
+
 /// Field paths in a serialized relay list that are not part of the
 /// [`SIGNED_VERSION`]-covered schema, sorted and deduplicated (empty =
 /// fully covered). A non-empty result on an emitted list means the signer
@@ -397,14 +489,27 @@ const SIGNED_V10_FIELDS: &[&str] = &[
 /// use it to turn that failure mode into a distinct, actionable error.
 #[must_use]
 pub fn unknown_signed_fields(payload: &serde_json::Value) -> Vec<String> {
+    unknown_signed_fields_for(SIGNED_VERSION, payload)
+}
+
+/// [`unknown_signed_fields`] against a specific schema version, so the
+/// `/v2/exits` signer and verifier check the v11 allowlist while `/v1/exits`
+/// keeps checking v10 unchanged.
+#[must_use]
+pub fn unknown_signed_fields_for(version: u32, payload: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
-    collect_unknown_fields(payload, "", &mut out);
+    collect_unknown_fields(version, payload, "", &mut out);
     out.sort();
     out.dedup();
     out
 }
 
-fn collect_unknown_fields(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+fn collect_unknown_fields(
+    version: u32,
+    value: &serde_json::Value,
+    path: &str,
+    out: &mut Vec<String>,
+) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
@@ -413,8 +518,8 @@ fn collect_unknown_fields(value: &serde_json::Value, path: &str, out: &mut Vec<S
                 } else {
                     format!("{path}.{key}")
                 };
-                if SIGNED_V10_FIELDS.contains(&child_path.as_str()) {
-                    collect_unknown_fields(child, &child_path, out);
+                if field_is_covered(version, &child_path) {
+                    collect_unknown_fields(version, child, &child_path, out);
                 } else {
                     out.push(child_path);
                 }
@@ -423,7 +528,7 @@ fn collect_unknown_fields(value: &serde_json::Value, path: &str, out: &mut Vec<S
         serde_json::Value::Array(items) => {
             let elem_path = format!("{path}[]");
             for item in items {
-                collect_unknown_fields(item, &elem_path, out);
+                collect_unknown_fields(version, item, &elem_path, out);
             }
         }
         _ => {}
@@ -448,9 +553,53 @@ pub fn sign_relay_list(
     signed_at: u64,
     expires_at: u64,
 ) -> SignedRelayList {
+    sign_relay_list_versioned(
+        SIGNED_VERSION,
+        nodes,
+        server_key,
+        generation,
+        signed_at,
+        expires_at,
+    )
+}
+
+/// [`sign_relay_list`] stamping [`SIGNED_VERSION_V2`], for `GET /v2/exits`.
+///
+/// # Panics
+/// Same infallible-serialization invariant as [`sign_relay_list`].
+#[must_use]
+pub fn sign_relay_list_v2(
+    nodes: Vec<JsonNode>,
+    server_key: &SigningKey,
+    generation: u64,
+    signed_at: u64,
+    expires_at: u64,
+) -> SignedRelayList {
+    sign_relay_list_versioned(
+        SIGNED_VERSION_V2,
+        nodes,
+        server_key,
+        generation,
+        signed_at,
+        expires_at,
+    )
+}
+
+/// The one signer both versions share. Version is a parameter rather than two
+/// copies of the body: the canonical preimage must stay identical apart from
+/// the `version` field, and two copies are how that silently stops being true.
+#[must_use]
+fn sign_relay_list_versioned(
+    version: u32,
+    nodes: Vec<JsonNode>,
+    server_key: &SigningKey,
+    generation: u64,
+    signed_at: u64,
+    expires_at: u64,
+) -> SignedRelayList {
     let server_pubkey_hex = hex::encode(server_key.verifying_key().as_bytes());
     let unsigned = UnsignedRelayList {
-        version: SIGNED_VERSION,
+        version,
         nodes: &nodes,
         generation,
         signed_at,
@@ -462,7 +611,7 @@ pub fn sign_relay_list(
     let signature = server_key.sign(&canonical);
 
     SignedRelayList {
-        version: SIGNED_VERSION,
+        version,
         nodes,
         generation,
         signed_at,
@@ -517,7 +666,9 @@ pub fn verify_signed_relay_list_any(
         return Err(SignedError::InputTooLarge);
     }
     let signed: SignedRelayList = serde_json::from_str(s)?;
-    if signed.version != SIGNED_VERSION {
+    // Both served schemas are accepted: /v1/exits still emits v10 and
+    // /v2/exits emits v11. Anything else is refused, as before.
+    if signed.version != SIGNED_VERSION && signed.version != SIGNED_VERSION_V2 {
         return Err(SignedError::UnsupportedVersion {
             got: signed.version,
         });
@@ -570,7 +721,16 @@ fn classify_bad_signature(s: &str) -> SignedError {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(s) else {
         return SignedError::BadSignature;
     };
-    let unknown = unknown_signed_fields(&payload);
+    // Classify against the payload's OWN declared version: a v11 list read by
+    // a build that only knew v10 would otherwise report its six legitimate
+    // v11 fields as the cause of a bad signature, which is the opposite of
+    // actionable.
+    let version = payload
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(SIGNED_VERSION);
+    let unknown = unknown_signed_fields_for(version, &payload);
     let Some(path) = unknown.first() else {
         return SignedError::BadSignature;
     };
@@ -671,6 +831,12 @@ mod tests {
             cover_domain: None,
             port_forward: None,
             tcp_fallback: None,
+            last_seen_unix: None,
+            stale: None,
+            provider: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         }
     }
 
@@ -1494,5 +1660,113 @@ mod tests {
                 .reason_code(),
             "input-too-large"
         );
+    }
+
+    // ---- v11 / `GET /v2/exits` (2026-08-29: absence in the roster could not
+    // express "aged out of a liveness TTL" versus "decommissioned", and that
+    // ambiguity walled a user's host).
+
+    fn stale_node() -> JsonNode {
+        JsonNode {
+            last_seen_unix: Some(1_700_000_000),
+            stale: Some(true),
+            ..sample_node()
+        }
+    }
+
+    /// THE regression guard for this whole rotation. A v10 list emitted with
+    /// every v11 field unset must reproduce byte-for-byte what it produced
+    /// before v11 existed, because client verification is a strict equality
+    /// and `/v1/exits` stays frozen at v10 forever.
+    #[test]
+    fn a_v10_list_is_byte_identical_now_that_v11_fields_exist() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 7, 1_700_000_000, 1_700_086_400);
+        let payload = serde_json::to_value(&signed).expect("to_value");
+        let node = &payload["nodes"][0];
+
+        assert_eq!(signed.version, 10, "/v1 must keep emitting v10");
+        for field in [
+            "last_seen_unix",
+            "stale",
+            "provider",
+            "virt",
+            "city_code",
+            "node_index",
+        ] {
+            assert_eq!(
+                node.get(field),
+                None,
+                "an unset v11 field must not appear in a v10 payload: it would \
+                 change the signed preimage and every installed client would \
+                 fail with a generic bad signature"
+            );
+        }
+        assert!(
+            unknown_signed_fields(&payload).is_empty(),
+            "a v10 payload stays fully covered by the v10 schema"
+        );
+    }
+
+    /// The v11 fields ride on `/v2/exits` and verify there.
+    #[test]
+    fn a_v11_list_carries_the_liveness_fields_and_verifies() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list_v2(vec![stale_node()], &key, 8, 1_700_000_600, 1_700_086_400);
+        assert_eq!(signed.version, SIGNED_VERSION_V2);
+
+        let payload = serde_json::to_value(&signed).expect("to_value");
+        assert_eq!(payload["nodes"][0]["last_seen_unix"], 1_700_000_000);
+        assert_eq!(payload["nodes"][0]["stale"], true);
+        assert!(
+            unknown_signed_fields_for(SIGNED_VERSION_V2, &payload).is_empty(),
+            "the v11 schema must cover its own fields, or the emit guard 500s"
+        );
+
+        let json = serde_json::to_string(&signed).expect("to_string");
+        let verified = verify_signed_relay_list(&json, None).expect("a v11 list must verify");
+        assert_eq!(verified.relays.relays().len(), 1);
+    }
+
+    /// Staleness is read against the envelope's own `signed_at`, never the
+    /// client's clock: both timestamps are the server's and are signed
+    /// together, so the reading survives caching and is immune to device clock
+    /// skew (2026-08-18 refused a whole day of mobile logins over that).
+    #[test]
+    fn staleness_is_computable_from_the_envelope_without_a_client_clock() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list_v2(vec![stale_node()], &key, 9, 1_700_000_095, 1_700_086_400);
+        let age = signed.signed_at - signed.nodes[0].last_seen_unix.expect("carried");
+        assert_eq!(age, 95, "95 s of staleness at signing, on one clock");
+    }
+
+    /// A v11 field on a v10 payload is still uncovered, so the emit guard
+    /// keeps refusing the exact drift it exists to catch: the rotation must
+    /// not have quietly widened v10.
+    #[test]
+    fn a_v11_field_is_still_uncovered_under_the_v10_schema() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let mut payload = serde_json::to_value(&signed).expect("to_value");
+        payload["nodes"][0]["stale"] = serde_json::Value::Bool(true);
+        assert_eq!(
+            unknown_signed_fields(&payload),
+            vec!["nodes[].stale".to_owned()],
+            "v10 must not have been widened by the v11 rotation"
+        );
+    }
+
+    /// Widening the verifier to two versions must not widen it to any version.
+    #[test]
+    fn a_version_that_is_neither_ten_nor_eleven_is_refused() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list(vec![sample_node()], &key, 1, 1_700_000_000, 1_700_086_400);
+        let mut payload = serde_json::to_value(&signed).expect("to_value");
+        payload["version"] = serde_json::Value::from(12);
+        let json = serde_json::to_string(&payload).expect("to_string");
+        assert!(matches!(
+            verify_signed_relay_list(&json, None),
+            Err(SignedError::UnsupportedVersion { got: 12 })
+        ));
     }
 }

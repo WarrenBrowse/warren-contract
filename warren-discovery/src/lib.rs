@@ -68,9 +68,10 @@ pub use roster::{
 pub use rtt::{DEFAULT_RTT_TTL_SECS, EndpointId, RttCache};
 pub use selector::{SelectorError, WarrenRelaySelector};
 pub use signed::{
-    JsonEgress, JsonEndpoint, JsonListener, JsonLocation, JsonNode, SIGNED_VERSION, SignedError,
-    SignedRelayList, VerifiedRelayList, sign_relay_list, unknown_signed_fields,
-    verify_signed_relay_list, verify_signed_relay_list_any,
+    JsonEgress, JsonEndpoint, JsonListener, JsonLocation, JsonNode, SIGNED_VERSION,
+    SIGNED_VERSION_V2, SignedError, SignedRelayList, VerifiedRelayList, sign_relay_list,
+    sign_relay_list_v2, unknown_signed_fields, unknown_signed_fields_for, verify_signed_relay_list,
+    verify_signed_relay_list_any,
 };
 // The notice DTO itself lives in the contract crate (one definition for the
 // backend and every SDK); re-exported because [`VerifiedNotices`] hands it

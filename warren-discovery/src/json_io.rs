@@ -143,6 +143,12 @@ mod tests {
             cover_domain: None,
             port_forward: None,
             tcp_fallback: None,
+            last_seen_unix: None,
+            stale: None,
+            provider: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let msg = json_node_to_warren(node)
             .expect_err("malformed IP literal must be rejected")
