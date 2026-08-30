@@ -246,23 +246,34 @@ pub struct JsonNode {
     /// fail-slow dial, which is worse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<bool>,
-    /// Hosting provider letter of the fleet naming scheme (`m` m247,
-    /// `f` flokinet, `h` hetzner, ...). Reserved; populated once nodes report
-    /// it through their manifest.
+    /// The node's fleet name, composed server-side from its stored
+    /// components (`<cc>-<city3>-<env><virt><role><provider><n>`, e.g.
+    /// `fr-par-bved1`).
+    ///
+    /// Composed here and not at the edge, on purpose. The scheme must have
+    /// exactly ONE implementation: a wire that shipped the components would
+    /// hand every consumer a copy of the rules, and two unreconciled naming
+    /// conventions is precisely the problem this replaced. The letters that
+    /// build it (`provider_code`, `virt_code`, `city_code`, `node_index`) are
+    /// operator-assigned facts that live in the manifest and the database and
+    /// have no reason to travel to a client handed the finished name.
+    ///
+    /// `None` while a node has not reported every component, so a partially
+    /// migrated fleet carries no name rather than a malformed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Hosting provider in PLAINTEXT, for display (`Hetzner`, `FDCservers`).
+    ///
+    /// Not the scheme letter: the letter is not derivable from the name
+    /// (FDCservers is `d`, because `f` is FlokiNet) and the name is not
+    /// derivable from the letter without a mapping table, which is the
+    /// hand-maintained list this field exists to delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Virtualization letter (`v` virtual, `c` container, `d` dedicated,
-    /// `r` raspberry). Reserved; see `provider`.
+    /// Virtualization in PLAINTEXT, for display (`KVM`, `Bare metal`).
+    /// Auto-detected on the node from DMI, overridable from its manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virt: Option<String>,
-    /// Three-letter city code (`par`, `ams`, `fsn`), which cannot be derived
-    /// from `location.city` (`fsn` is a datacenter code, not an IATA one).
-    /// Reserved; see `provider`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub city_code: Option<String>,
-    /// Per-location index of the node. Reserved; see `provider`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_index: Option<u32>,
 }
 
 /// **Signed** node list (full wire format, `relays.json` v10).
@@ -468,10 +479,9 @@ const SIGNED_V10_FIELDS: &[&str] = &[
 const SIGNED_V11_EXTRA_FIELDS: &[&str] = &[
     "nodes[].last_seen_unix",
     "nodes[].stale",
+    "nodes[].name",
     "nodes[].provider",
     "nodes[].virt",
-    "nodes[].city_code",
-    "nodes[].node_index",
 ];
 
 /// Whether `path` is covered by the schema of `version`.
@@ -833,10 +843,9 @@ mod tests {
             tcp_fallback: None,
             last_seen_unix: None,
             stale: None,
+            name: None,
             provider: None,
             virt: None,
-            city_code: None,
-            node_index: None,
         }
     }
 
@@ -1674,6 +1683,43 @@ mod tests {
         }
     }
 
+    fn named_node() -> JsonNode {
+        JsonNode {
+            name: Some("fr-par-bved1".to_owned()),
+            provider: Some("FDCservers".to_owned()),
+            virt: Some("Bare metal".to_owned()),
+            ..sample_node()
+        }
+    }
+
+    /// The wire carries the COMPOSED name and PLAINTEXT labels, never the
+    /// scheme letters. The letters (`provider_code`, `city_code`, ...) are
+    /// operator-assigned codes that stay in the manifest and the database:
+    /// shipping them would hand every consumer a copy of the naming rules, and
+    /// two implementations of one scheme is the drift this replaced.
+    #[test]
+    fn v11_carries_the_composed_name_and_plaintext_never_the_scheme_letters() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list_v2(vec![named_node()], &key, 12, 1_700_000_000, 1_700_086_400);
+        let payload = serde_json::to_value(&signed).expect("to_value");
+        let node = &payload["nodes"][0];
+
+        assert_eq!(node["name"], "fr-par-bved1");
+        assert_eq!(
+            node["provider"], "FDCservers",
+            "plaintext, not the letter d"
+        );
+        assert_eq!(node["virt"], "Bare metal");
+        for letter_field in ["provider_code", "virt_code", "city_code", "node_index"] {
+            assert_eq!(
+                node.get(letter_field),
+                None,
+                "{letter_field} is a server-side component and must never reach a client"
+            );
+        }
+        assert!(unknown_signed_fields_for(SIGNED_VERSION_V2, &payload).is_empty());
+    }
+
     /// THE regression guard for this whole rotation. A v10 list emitted with
     /// every v11 field unset must reproduce byte-for-byte what it produced
     /// before v11 existed, because client verification is a strict equality
@@ -1686,14 +1732,7 @@ mod tests {
         let node = &payload["nodes"][0];
 
         assert_eq!(signed.version, 10, "/v1 must keep emitting v10");
-        for field in [
-            "last_seen_unix",
-            "stale",
-            "provider",
-            "virt",
-            "city_code",
-            "node_index",
-        ] {
+        for field in ["last_seen_unix", "stale", "name", "provider", "virt"] {
             assert_eq!(
                 node.get(field),
                 None,

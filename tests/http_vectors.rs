@@ -237,6 +237,53 @@ fn legacy_register_exit_request_without_update_status_or_telemetry_still_parses(
 }
 
 #[test]
+fn register_exit_fleet_identity_components_are_optional_and_roundtrip() {
+    // A heartbeat from a binary that predates the fleet-identity work must
+    // decode to None on every component, so the server's sticky COALESCE
+    // preserves whatever it already stored instead of blanking it.
+    let legacy = serde_json::json!({
+        "endpoints": [],
+        "country": "DE",
+        "city": "Falkenstein",
+        "weight": 100,
+    });
+    let parsed: RegisterExitRequest = serde_json::from_value(legacy).unwrap();
+    for (name, present) in [
+        ("provider_code", parsed.provider_code.is_some()),
+        ("provider", parsed.provider.is_some()),
+        ("virt_code", parsed.virt_code.is_some()),
+        ("virt", parsed.virt.is_some()),
+        ("city_code", parsed.city_code.is_some()),
+        ("node_index", parsed.node_index.is_some()),
+    ] {
+        assert!(!present, "absent {name} must parse as None");
+    }
+
+    // A reporting node carries the letters AND the plaintext: neither is
+    // derivable from the other (FDCservers is `d` because `f` is FlokiNet,
+    // and `fsn` is a datacenter code, not a truncation of "Falkenstein").
+    let full = serde_json::json!({
+        "endpoints": [],
+        "country": "DE",
+        "city": "Falkenstein",
+        "weight": 100,
+        "provider_code": "h",
+        "provider": "Hetzner",
+        "virt_code": "v",
+        "virt": "KVM",
+        "city_code": "fsn",
+        "node_index": 1,
+    });
+    let parsed: RegisterExitRequest = serde_json::from_value(full).unwrap();
+    assert_eq!(parsed.provider_code.as_deref(), Some("h"));
+    assert_eq!(parsed.provider.as_deref(), Some("Hetzner"));
+    assert_eq!(parsed.virt_code.as_deref(), Some("v"));
+    assert_eq!(parsed.virt.as_deref(), Some("KVM"));
+    assert_eq!(parsed.city_code.as_deref(), Some("fsn"));
+    assert_eq!(parsed.node_index, Some(1));
+}
+
+#[test]
 fn exit_telemetry_shape() {
     // Counters are cumulative since process start; the server derives rates
     // by delta and treats a decreasing counter as a process restart.

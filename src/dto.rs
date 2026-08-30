@@ -976,6 +976,37 @@ pub struct RegisterExitRequest {
     /// stored value). `None` from an exit binary that pre-dates the flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_fallback: Option<bool>,
+
+    // ---- Fleet identity components (doc: fleet naming scheme). All optional
+    // and sticky server-side like `hwqual` / `port_forward`: a heartbeat from a
+    // binary that predates them must never blank a stored value.
+    //
+    // The API composes the node's NAME from these
+    // (`<cc>-<city3>-<env><virt><role><provider><n>`) and serves only the
+    // composed result on `/v2/exits`. The components stay server-side: they are
+    // operator-assigned codes with no meaning to a client.
+    /// Provider letter of the naming scheme (`h` hetzner, `d` fdcservers,
+    /// `m` m247, `f` flokinet, `o` ovh). NOT derivable from `provider`:
+    /// FDCservers is `d` because `f` is already FlokiNet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    /// Hosting provider in plaintext, for display (`Hetzner`, `FDCservers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Virtualization letter (`v` virtual, `c` container, `d` dedicated,
+    /// `r` raspberry). Auto-detected from DMI on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virt_code: Option<String>,
+    /// Virtualization in plaintext, for display (`KVM`, `Bare metal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virt: Option<String>,
+    /// Three-letter city code (`par`, `fsn`, `ams`). NOT derivable from the
+    /// city: `fsn` is a datacenter code, not a truncation of "Falkenstein".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city_code: Option<String>,
+    /// Per-location index of this node, one digit in the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_index: Option<u32>,
 }
 
 /// Telemetry block of the exit heartbeat (doc 52 §4). Datapath and QUIC
@@ -1469,6 +1500,30 @@ pub struct AdminExitRow {
     /// not reported one (legacy binary, or the self-bench has not run yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hwqual: Option<ExitHwQual>,
+    /// Fleet identity components the node reported, plus the name the API
+    /// composes from them. Surfaced here because the admin panel is where an
+    /// operator verifies the data really landed in the database: the public
+    /// list serves only the composed `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Provider letter of the naming scheme (`h`, `d`, `m`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_code: Option<String>,
+    /// Hosting provider in plaintext (`Hetzner`, `FDCservers`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Virtualization letter (`v`, `c`, `d`, `r`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virt_code: Option<String>,
+    /// Virtualization in plaintext (`KVM`, `Bare metal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virt: Option<String>,
+    /// Three-letter city code (`par`, `fsn`, `ams`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city_code: Option<String>,
+    /// Per-location index of this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_index: Option<u32>,
 }
 
 /// Admin row of one uploaded exit release (doc 54).
@@ -4158,6 +4213,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -4203,6 +4264,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -4248,6 +4315,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -4287,6 +4360,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -4330,6 +4409,12 @@ mod tests {
             edge_cert_sha256_hex: Some(pin.clone()),
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
@@ -4382,6 +4467,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: Some(true),
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -4438,6 +4529,12 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            provider_code: None,
+            provider: None,
+            virt_code: None,
+            virt: None,
+            city_code: None,
+            node_index: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: RegisterExitRequest = serde_json::from_str(&json).unwrap();
