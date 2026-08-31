@@ -274,6 +274,45 @@ pub struct JsonNode {
     /// Auto-detected on the node from DMI, overridable from its manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virt: Option<String>,
+
+    // ---- v11, directory-merge tier (reserved 2026-08-31, emitted by
+    // nothing yet). /v2/exits absorbs /v1/multihop/directory, and the
+    // merge MUST NOT downgrade circuit selection to online trust: the
+    // directory's whole point is that warren-api cannot forge a node
+    // (offline root certifies the operational key, the operational key
+    // signs each descriptor). So the merged list carries the directory's
+    // proof objects verbatim, per node below and envelope-level on
+    // [`SignedRelayList`]. Reserved in the v11 zero-consumer window so
+    // the merge lands without a v12 rotation; every field is optional
+    // and absent-by-default, which changes no bytes.
+    /// Autonomous System number, when known (`None` = unknown). Mirrors
+    /// `NodeEntry.asn` of the directory: entry/exit AS diversity for
+    /// circuit selection, bound under `attestation_hex`, never trusted
+    /// from geoip alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    /// 128-char hex operational-key attestation over
+    /// `(relay_id, exit_ed25519_pubkey, asn, country)`, the directory's
+    /// per-node proof that geo and AS diversity are cryptographic rather
+    /// than server-asserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_hex: Option<String>,
+    /// The node as an entry hop: the directory's operational-signed
+    /// relay descriptor, carried verbatim so the merged list keeps the
+    /// offline trust chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_descriptor: Option<warrenguard_multihop::RelayDescriptorSigned>,
+    /// The node as an exit hop: the directory's operational-signed exit
+    /// descriptor, `endpoint` redacted to `None` on the public view by
+    /// design (the client dials the entry relay, never the exit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_descriptor: Option<warrenguard_multihop::ExitDescriptorSigned>,
+    /// 64-char hex SHA-256 of the node's ephemeral EdgeConnect cert
+    /// (browser WebTransport pinning). Server-envelope tier like the
+    /// directory's `edge_cert_sha256`: it rotates faster than the
+    /// offline signing cadence, so it is overlaid at serve time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_cert_sha256: Option<String>,
 }
 
 /// **Signed** node list (full wire format, `relays.json` v10).
@@ -295,6 +334,28 @@ pub struct SignedRelayList {
     /// 64-char hex of the server's `VerifyingKey`. The client must
     /// check this pubkey is the one expected for its deployment.
     pub server_pubkey_hex: String,
+    // ---- v11, directory-merge tier (reserved, nothing emits them yet;
+    // see the matching block on [`JsonNode`]). Envelope-level halves of
+    // the offline trust chain the merged list inherits from the
+    // directory. Declared BEFORE `signature_hex` and mirrored in
+    // [`UnsignedRelayList`], so a populated value is covered by the
+    // server signature; absent options change no bytes.
+    /// 64-char hex pubkey of the OFFLINE operational key that signs the
+    /// per-node descriptors. Clients verify descriptors against it, and
+    /// it against the pinned root via `operational_cert_hex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operational_pubkey_hex: Option<String>,
+    /// 128-char hex root-key certificate over the operational pubkey.
+    /// The root pubkey is baked client-side, never carried on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operational_cert_hex: Option<String>,
+    /// Monotonic generation of the embedded descriptor tier, the
+    /// directory's anti-rollback anchor, kept distinct from the list's
+    /// own `generation` because the two artifacts historically advanced
+    /// on different cadences and a merged rollback check must not let
+    /// one mask the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_generation: Option<u64>,
     /// 128-char hex Ed25519 signature over `canonical_bytes`.
     pub signature_hex: String,
 }
@@ -313,6 +374,15 @@ struct UnsignedRelayList<'a> {
     signed_at: u64,
     expires_at: u64,
     server_pubkey_hex: &'a str,
+    // Mirrors the reserved directory-merge tier of [`SignedRelayList`]:
+    // present values enter the preimage, absent ones vanish from it,
+    // exactly as they vanish from the signed JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operational_pubkey_hex: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operational_cert_hex: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    directory_generation: Option<u64>,
 }
 
 /// Result of a successful [`verify_signed_relay_list`]: the resolved
@@ -482,6 +552,35 @@ const SIGNED_V11_EXTRA_FIELDS: &[&str] = &[
     "nodes[].name",
     "nodes[].provider",
     "nodes[].virt",
+    // Directory-merge tier (reserved 2026-08-31, nothing emits it yet):
+    // /v2/exits absorbs /v1/multihop/directory WITH its offline trust
+    // chain, so the per-node proof objects and the envelope-level
+    // operational chain are first-class schema. The descriptor sub-paths
+    // are enumerated because the walker recurses into covered objects:
+    // an unlisted sub-field would read as a signer emitting outside the
+    // schema, exactly the outage class this allowlist exists to stop.
+    "operational_pubkey_hex",
+    "operational_cert_hex",
+    "directory_generation",
+    "nodes[].asn",
+    "nodes[].attestation_hex",
+    "nodes[].edge_cert_sha256",
+    "nodes[].relay_descriptor",
+    "nodes[].relay_descriptor.relay_id",
+    "nodes[].relay_descriptor.relay_ed25519_pubkey",
+    "nodes[].relay_descriptor.endpoint",
+    "nodes[].relay_descriptor.cover_domain",
+    "nodes[].relay_descriptor.tcp_fallback",
+    "nodes[].relay_descriptor.signature",
+    "nodes[].exit_descriptor",
+    "nodes[].exit_descriptor.exit_id",
+    "nodes[].exit_descriptor.exit_ed25519_pubkey",
+    "nodes[].exit_descriptor.exit_x25519_multihop_pubkey",
+    "nodes[].exit_descriptor.endpoint",
+    "nodes[].exit_descriptor.cover_domain",
+    "nodes[].exit_descriptor.signature",
+    "nodes[].exit_descriptor.dns_disabled",
+    "nodes[].exit_descriptor.exit_mlkem768_pubkey",
 ];
 
 /// Whether `path` is covered by the schema of `version`.
@@ -615,6 +714,10 @@ fn sign_relay_list_versioned(
         signed_at,
         expires_at,
         server_pubkey_hex: &server_pubkey_hex,
+        // Reserved directory-merge tier: nothing emits it yet.
+        operational_pubkey_hex: None,
+        operational_cert_hex: None,
+        directory_generation: None,
     };
     let canonical =
         serde_json::to_vec(&unsigned).expect("UnsignedRelayList JSON serialization is infallible");
@@ -627,6 +730,9 @@ fn sign_relay_list_versioned(
         signed_at,
         expires_at,
         server_pubkey_hex,
+        operational_pubkey_hex: None,
+        operational_cert_hex: None,
+        directory_generation: None,
         signature_hex: hex::encode(signature.to_bytes()),
     }
 }
@@ -700,6 +806,11 @@ pub fn verify_signed_relay_list_any(
         signed_at: signed.signed_at,
         expires_at: signed.expires_at,
         server_pubkey_hex: &signed.server_pubkey_hex,
+        // Carried through from the wire: a populated directory-merge
+        // tier enters the preimage and is covered by the signature.
+        operational_pubkey_hex: signed.operational_pubkey_hex.as_deref(),
+        operational_cert_hex: signed.operational_cert_hex.as_deref(),
+        directory_generation: signed.directory_generation,
     };
     let canonical = serde_json::to_vec(&unsigned).map_err(SignedError::Json)?;
 
@@ -846,7 +957,98 @@ mod tests {
             name: None,
             provider: None,
             virt: None,
+            asn: None,
+            attestation_hex: None,
+            relay_descriptor: None,
+            exit_descriptor: None,
+            edge_cert_sha256: None,
         }
+    }
+
+    #[test]
+    fn v11_covers_a_fully_populated_directory_merge_payload() {
+        // The /v2/exits merge absorbs /v1/multihop/directory, and these
+        // names are reserved in the v11 zero-consumer window so the merge
+        // needs no v12. This test IS the allowlist's completeness check:
+        // build a node carrying every reserved field, serialize, and
+        // require zero unknown paths for v11. If a reserved struct field
+        // is missing from SIGNED_V11_FIELDS the walker names it here,
+        // instead of a deployed signer refusing to emit years later.
+        use warrenguard_multihop::{ExitDescriptorSigned, RelayDescriptorSigned};
+
+        let mut node = sample_node();
+        node.asn = Some(9009);
+        node.attestation_hex = Some("ab".repeat(64));
+        node.edge_cert_sha256 = Some("cd".repeat(32));
+        node.relay_descriptor = Some(RelayDescriptorSigned {
+            relay_id: [0x11; 16],
+            relay_ed25519_pubkey: [0x22; 32],
+            endpoint: "198.51.100.7:443".parse().expect("addr"),
+            cover_domain: Some("ro1.edge.example.net".to_owned()),
+            tcp_fallback: true,
+            signature: [0xee; 64],
+        });
+        node.exit_descriptor = Some(ExitDescriptorSigned {
+            exit_id: ExitId::from_bytes([0x33; 16]),
+            exit_ed25519_pubkey: [0x44; 32],
+            exit_x25519_multihop_pubkey: [0x55; 32],
+            endpoint: None,
+            cover_domain: Some("ro1.edge.example.net".to_owned()),
+            signature: [0xff; 64],
+            dns_disabled: false,
+            exit_mlkem768_pubkey: Some(vec![0x66; 32]),
+        });
+
+        let key = fixed_server_key();
+        let mut signed = sign_relay_list_v2(vec![node], &key, 7, 1_700_000_000, 1_700_086_400);
+        signed.operational_pubkey_hex = Some("0e".repeat(32));
+        signed.operational_cert_hex = Some("1f".repeat(64));
+        signed.directory_generation = Some(1_788_190_395);
+
+        let payload = serde_json::to_value(&signed).expect("to_value");
+        let unknown = unknown_signed_fields_for(SIGNED_VERSION_V2, &payload);
+        assert!(
+            unknown.is_empty(),
+            "v11 must cover the whole directory-merge tier, uncovered: {unknown:?}",
+        );
+
+        // Containment: v10 must keep REFUSING every one of these paths,
+        // otherwise a signer could cover them on /v1/exits and fail every
+        // deployed client with a generic bad-signature.
+        let v10_unknown = unknown_signed_fields_for(SIGNED_VERSION, &payload);
+        assert!(
+            v10_unknown.iter().any(|p| p == "nodes[].asn"),
+            "v10 must not silently absorb the merge tier: {v10_unknown:?}",
+        );
+    }
+
+    #[test]
+    fn a_directory_merge_tier_added_after_signing_fails_verification() {
+        // The envelope-level operational chain must be SIGNATURE-COVERED,
+        // not decorative: a MITM that injects its own operational pubkey
+        // and cert into a served list would otherwise swap the whole
+        // offline trust anchor while the server signature still checks.
+        // The preimage includes the populated fields, so post-sign
+        // injection must break the crypto.
+        let key = fixed_server_key();
+        let mut signed =
+            sign_relay_list_v2(vec![sample_node()], &key, 7, 1_700_000_000, 1_700_086_400);
+        assert!(
+            verify_signed_relay_list_any(&serde_json::to_string(&signed).expect("json"), &[])
+                .is_ok(),
+            "untampered v11 list must verify",
+        );
+        signed.operational_pubkey_hex = Some("0e".repeat(32));
+        signed.operational_cert_hex = Some("1f".repeat(64));
+        signed.directory_generation = Some(1);
+        let tampered = serde_json::to_string(&signed).expect("json");
+        assert!(
+            matches!(
+                verify_signed_relay_list_any(&tampered, &[]),
+                Err(SignedError::BadSignature)
+            ),
+            "post-sign injection of the operational chain must fail the signature",
+        );
     }
 
     #[test]
@@ -1510,6 +1712,9 @@ mod tests {
             signed_at: 1_700_000_000,
             expires_at: 1_700_086_400,
             server_pubkey_hex: &server_pubkey_hex,
+            operational_pubkey_hex: None,
+            operational_cert_hex: None,
+            directory_generation: None,
         };
         let mut payload = serde_json::to_value(&unsigned).expect("to_value");
         payload["nodes"][0][extra_field] = serde_json::Value::Bool(true);
