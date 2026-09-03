@@ -17,6 +17,7 @@
 //! the Warren tunnel parameters on the `talpid-warren` side, then the tunnel
 //! state machine calls the Warren backend when selected.
 
+mod announcements;
 mod envelope;
 mod forum_digest;
 mod json_io;
@@ -30,11 +31,16 @@ mod roster;
 mod rtt;
 mod selector;
 mod signed;
+mod version_range;
 
 /// Directory-minting fixtures for other crates' tests (behind `test-helpers`).
 #[cfg(feature = "test-helpers")]
 pub use multihop_directory::test_helpers;
 
+pub use announcements::{
+    ANNOUNCEMENTS_VERSION, AnnouncementsError, SignedAnnouncements, VerifiedAnnouncements,
+    sign_announcements, verify_signed_announcements, verify_signed_announcements_any,
+};
 pub use forum_digest::{
     FORUM_DIGEST_VERSION, ForumDigestError, SignedForumDigest, UNREAD_SATURATED,
     VerifiedForumDigest, pack_unread_counts, sign_forum_digest, verify_forum_digest,
@@ -81,7 +87,7 @@ pub use signed::{
 // The notice DTO itself lives in the contract crate (one definition for the
 // backend and every SDK); re-exported because [`VerifiedNotices`] hands it
 // out, so a consumer has to be able to name it without a second dependency.
-pub use warren_contract::dto::{Notice, NoticeLevel};
+pub use warren_contract::dto::{Announcement, AnnouncementCta, Notice, NoticeLevel};
 
 /// Re-exports of the Warren types exposed by this crate's public API,
 /// so callers (e.g. `mullvad-daemon`) can consume the selector without

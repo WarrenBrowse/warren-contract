@@ -60,7 +60,11 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, macstudio-arm64]
     timeout-minutes: 30
     steps:
+      # The test binaries replay the shared golden vectors (warren-vectors),
+      # checked out as the `vectors/` submodule.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       # The root [patch] redirects the pinned warrenguard git deps to the
       # sibling checkout, so CI clones it there at `.warrenguard-version`.
       # ENGINE_TOKEN (Contents:read on WarrenBrowse/warrenguard) is optional;

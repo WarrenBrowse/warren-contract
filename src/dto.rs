@@ -129,6 +129,10 @@ pub enum ValidationError {
     /// [`crl_canonical_message`]).
     #[error("CRL reason contains a line break: {0}")]
     InvalidCrlReason(String),
+    /// An announcement call-to-action URL is not a plain `https` link
+    /// (wrong scheme, userinfo, non-ASCII, whitespace, or over the cap).
+    #[error("invalid announcement CTA url: {0}")]
+    InvalidCtaUrl(String),
 }
 
 /// Currency of the received payment. Used by the pricing policy to map
@@ -3021,6 +3025,132 @@ pub struct Notice {
 /// is refused at publication instead of shipped unreadable.
 pub const MAX_NOTICE_MESSAGE_LEN: usize = 500;
 
+/// Longest announcement headline the API accepts. The card gives it one
+/// line at the top of the connect screen, so a longer one is refused at
+/// publication instead of shipped truncated.
+pub const MAX_ANNOUNCEMENT_HEADLINE_LEN: usize = 120;
+
+/// Longest announcement body the API accepts. The card scrolls, so this
+/// is a bound on the signed document rather than a layout limit.
+pub const MAX_ANNOUNCEMENT_BODY_LEN: usize = 2_000;
+
+/// Longest call-to-action label the API accepts. It is a button caption.
+pub const MAX_ANNOUNCEMENT_CTA_LABEL_LEN: usize = 40;
+
+/// Longest call-to-action URL the API accepts.
+pub const MAX_ANNOUNCEMENT_CTA_URL_LEN: usize = 512;
+
+/// Optional call to action rendered as a button under an announcement.
+///
+/// Both fields are plain wire strings so that a client that verified the
+/// envelope rebuilds the canonical preimage byte for byte. The URL is not
+/// a validating newtype on purpose: a rejected value must never stop the
+/// whole signed document from parsing, because that would take the
+/// operator's broadcast channel offline for every client at once. It is
+/// checked at publication and again by
+/// [`Announcement::displayable_cta`] before it becomes clickable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncementCta {
+    /// Button caption, plain text rendered verbatim.
+    pub label: String,
+    /// Destination opened in the system browser, `https` only.
+    pub url: String,
+}
+
+/// A broadcast announcement pushed to clients via `GET /v1/announcements`.
+///
+/// Separate from [`Notice`] on purpose: notices verify by re-serializing
+/// the client's own struct, so a field a deployed client does not know
+/// makes every notice fail signature verification and the client shows
+/// nothing at all. An announcement therefore rides its own envelope and
+/// its own version, and the notices wire stays untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Announcement {
+    /// Unique announcement identifier (hex, server-assigned). Clients
+    /// persist a dismissal against it, so it is stable for the life of
+    /// the announcement.
+    pub id: String,
+    /// One-line title, plain text rendered verbatim.
+    pub headline: String,
+    /// Body text, plain text rendered verbatim, no markup.
+    pub body: String,
+    /// Severity level. Reuses the notice levels: `NoticeLevel` is a
+    /// closed lowercase enum, and a token a deployed client cannot parse
+    /// would break the whole envelope on it.
+    pub level: NoticeLevel,
+    /// Optional call to action.
+    pub cta: Option<AnnouncementCta>,
+    /// Campaign this announcement belongs to, when it carries an offer.
+    /// The id a client passes to `GET /v1/campaign/{id}/voucher`.
+    pub campaign_id: Option<String>,
+    /// True when the campaign hands the account a voucher code, so the
+    /// client knows to make the second, wallet-signed call.
+    pub voucher_offer: bool,
+    /// Minimum client version this announcement applies to (inclusive).
+    /// `None` = all versions.
+    pub min_client_version: Option<String>,
+    /// Maximum client version this announcement applies to (inclusive).
+    /// `None` = all versions.
+    pub max_client_version: Option<String>,
+    /// Unix timestamp after which the announcement is no longer shown.
+    /// `None` = until the operator deletes it.
+    pub expires_at: Option<u64>,
+}
+
+impl Announcement {
+    /// The call to action a client may turn into a clickable control:
+    /// `None` when the announcement carries none, and `None` when the
+    /// URL does not pass [`validate_cta_url`].
+    ///
+    /// Withholding only the button, never the announcement, is the
+    /// deliberate split: the text is the operator's message and still
+    /// reaches the user, while an unsafe link never becomes clickable.
+    #[must_use]
+    pub fn displayable_cta(&self) -> Option<&AnnouncementCta> {
+        self.cta
+            .as_ref()
+            .filter(|cta| validate_cta_url(&cta.url).is_ok())
+    }
+}
+
+/// Checks that a call-to-action URL is safe to render as a clickable
+/// control on every user's home screen.
+///
+/// The rules are deliberately narrow, because the reader judges a link by
+/// what the button says and not by where it goes: exactly the lowercase
+/// `https://` scheme (a scheme in another case, or another scheme
+/// entirely, is refused rather than normalised), a non-empty authority
+/// with no `@` in it (userinfo hides the real host), ASCII only (no
+/// homograph host), no whitespace or control character anywhere (a
+/// newline smuggled into an href), and at most
+/// [`MAX_ANNOUNCEMENT_CTA_URL_LEN`] bytes.
+///
+/// # Errors
+/// [`ValidationError::InvalidCtaUrl`] with a redacted prefix of the input
+/// when any of those rules is broken.
+pub fn validate_cta_url(url: &str) -> Result<(), ValidationError> {
+    let reject = || Err(ValidationError::InvalidCtaUrl(crate::redact(url)));
+
+    if url.len() > MAX_ANNOUNCEMENT_CTA_URL_LEN {
+        return reject();
+    }
+    if url.bytes().any(|b| !b.is_ascii() || b <= b' ' || b == 0x7f) {
+        return reject();
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
+        return reject();
+    };
+    // The authority ends at the first path/query/fragment delimiter. A
+    // backslash is not a delimiter here on purpose: browsers read it as
+    // one, so leaving it inside the authority is what makes
+    // `https://good.example\@evil.example/` fail the `@` check.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return reject();
+    }
+    Ok(())
+}
+
 /// Admin request body for `POST /v1/admin/notices`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminCreateNoticeRequest {
@@ -5211,5 +5341,184 @@ mod tests {
         assert_eq!(parsed.exit_pubkey_hex, req.exit_pubkey_hex);
         assert_eq!(parsed.reason_code, req.reason_code);
         assert_eq!(parsed.ts_unix, req.ts_unix);
+    }
+
+    fn full_announcement() -> Announcement {
+        Announcement {
+            id: "0000000000000001".to_owned(),
+            headline: "Warren production is open".to_owned(),
+            body: "Your beta account gets one free month on production.".to_owned(),
+            level: NoticeLevel::Info,
+            cta: Some(AnnouncementCta {
+                label: "Open the download page".to_owned(),
+                url: "https://warren.ro/download".to_owned(),
+            }),
+            campaign_id: Some("prod-launch".to_owned()),
+            voucher_offer: true,
+            min_client_version: Some("1.1.0".to_owned()),
+            max_client_version: Some("2.0.0".to_owned()),
+            expires_at: Some(1_700_021_600),
+        }
+    }
+
+    fn minimal_announcement() -> Announcement {
+        Announcement {
+            id: "0000000000000002".to_owned(),
+            headline: "Scheduled maintenance".to_owned(),
+            body: "The API is unavailable tonight.".to_owned(),
+            level: NoticeLevel::Warning,
+            cta: None,
+            campaign_id: None,
+            voucher_offer: false,
+            min_client_version: None,
+            max_client_version: None,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn announcement_full_wire_shape_is_frozen() {
+        assert_eq!(
+            serde_json::to_value(full_announcement()).expect("serialize"),
+            serde_json::json!({
+                "id": "0000000000000001",
+                "headline": "Warren production is open",
+                "body": "Your beta account gets one free month on production.",
+                "level": "info",
+                "cta": {
+                    "label": "Open the download page",
+                    "url": "https://warren.ro/download"
+                },
+                "campaign_id": "prod-launch",
+                "voucher_offer": true,
+                "min_client_version": "1.1.0",
+                "max_client_version": "2.0.0",
+                "expires_at": 1_700_021_600
+            }),
+            "the announcement wire shape is inside a signed preimage: any drift breaks every deployed client"
+        );
+    }
+
+    #[test]
+    fn announcement_minimal_wire_shape_keeps_explicit_nulls() {
+        assert_eq!(
+            serde_json::to_value(minimal_announcement()).expect("serialize"),
+            serde_json::json!({
+                "id": "0000000000000002",
+                "headline": "Scheduled maintenance",
+                "body": "The API is unavailable tonight.",
+                "level": "warning",
+                "cta": null,
+                "campaign_id": null,
+                "voucher_offer": false,
+                "min_client_version": null,
+                "max_client_version": null,
+                "expires_at": null
+            }),
+            "absent optionals stay explicit nulls, exactly as Notice encodes them"
+        );
+    }
+
+    #[test]
+    fn announcement_round_trips_through_the_wire() {
+        for a in [full_announcement(), minimal_announcement()] {
+            let json = serde_json::to_string(&a).expect("serialize");
+            let back: Announcement = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, a, "the signed preimage is rebuilt from this struct");
+        }
+    }
+
+    #[test]
+    fn a_cta_url_must_be_https() {
+        assert!(validate_cta_url("https://warren.ro/download").is_ok());
+        for bad in [
+            "http://warren.ro/download",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "HTTPS://warren.ro/download",
+            "//warren.ro/download",
+        ] {
+            assert!(
+                matches!(
+                    validate_cta_url(bad),
+                    Err(ValidationError::InvalidCtaUrl(_))
+                ),
+                "a clickable control on every home screen must be https: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cta_url_carrying_credentials_is_refused() {
+        for bad in [
+            "https://user:pass@warren.ro/",
+            "https://warren.ro@evil.example/",
+            "https://warren.ro\\@evil.example/",
+        ] {
+            assert!(
+                matches!(
+                    validate_cta_url(bad),
+                    Err(ValidationError::InvalidCtaUrl(_))
+                ),
+                "userinfo hides the real host from the reader: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cta_url_with_control_characters_or_no_host_is_refused() {
+        for bad in [
+            "https://",
+            "https://warren.ro/a\nb",
+            "https://warren.ro/ b",
+            "https://wärren.ro/",
+        ] {
+            assert!(
+                matches!(
+                    validate_cta_url(bad),
+                    Err(ValidationError::InvalidCtaUrl(_))
+                ),
+                "a smuggled character must not reach an href: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cta_url_above_the_cap_is_refused() {
+        let long = format!(
+            "https://warren.ro/{}",
+            "a".repeat(MAX_ANNOUNCEMENT_CTA_URL_LEN)
+        );
+        assert!(
+            matches!(
+                validate_cta_url(&long),
+                Err(ValidationError::InvalidCtaUrl(_))
+            ),
+            "the URL cap is refused at publication, not truncated on screen"
+        );
+    }
+
+    #[test]
+    fn an_invalid_cta_url_error_redacts_the_value() {
+        let bad = "http://warren.ro/a-very-long-path-that-must-not-be-echoed";
+        let msg = validate_cta_url(bad)
+            .expect_err("must be refused")
+            .to_string();
+        assert!(!msg.contains(bad), "full value must not leak: {msg}");
+        assert!(msg.contains("http://w…"), "short prefix kept: {msg}");
+    }
+
+    #[test]
+    fn an_unsafe_cta_is_withheld_from_the_renderer() {
+        let mut a = full_announcement();
+        assert!(a.displayable_cta().is_some(), "a safe link is rendered");
+        a.cta = Some(AnnouncementCta {
+            label: "Claim your month".to_owned(),
+            url: "http://warren.ro.evil.example/".to_owned(),
+        });
+        assert!(
+            a.displayable_cta().is_none(),
+            "a signed but unsafe link must not become a button, and must not hide the announcement"
+        );
     }
 }

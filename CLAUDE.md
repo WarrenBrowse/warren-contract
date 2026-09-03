@@ -33,9 +33,11 @@ that compiles on both sides can still break the wire.
   backend, so a mismatch here breaks two implementations at once. The in-repo
   freeze tests live under `tests/` (`http_vectors.rs`, `phase_vectors.rs`,
   `fixtures/`); the cross-SDK corpus lives in the shared `warren-vectors` repo,
-  submoduled as `vectors/` in `warrenguard`, `warren-core` and the SDK repos
-  (the shared wire-vectors rule, imported above, governs what to do about a
-  mismatch).
+  submoduled as `vectors/` here and in `warrenguard`, `warren-core` and the SDK
+  repos (the shared wire-vectors rule, imported above, governs what to do about
+  a mismatch). `warren-discovery/tests/announcement_vector.rs` replays
+  `vectors/announcements_v1.json`, so run `git submodule update --init vectors`
+  once per clone; CI checks the submodule out with the repo.
 - **No product policy, no control-plane logic, no I/O.** This crate describes the
   contract; it does not decide anything. Anything that makes a decision belongs in
   `warren-core` (server side) or in the SDK (client side).
