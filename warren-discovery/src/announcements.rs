@@ -308,8 +308,7 @@ mod tests {
             body: "body".to_owned(),
             level: NoticeLevel::Info,
             cta: None,
-            campaign_id: None,
-            voucher_offer: false,
+            voucher_campaign_id: None,
             min_client_version: None,
             max_client_version: None,
             expires_at: None,
@@ -343,8 +342,7 @@ mod tests {
             label: "Download".to_owned(),
             url: "https://warren.ro/download".to_owned(),
         });
-        a.campaign_id = Some("prod-launch".to_owned());
-        a.voucher_offer = true;
+        a.voucher_campaign_id = Some("prod-launch".to_owned());
         let json = signed_json(vec![a], 7);
 
         let verified = verify_signed_announcements(&json, Some(&pin())).expect("must verify");
@@ -355,9 +353,10 @@ mod tests {
         );
         let first = verified.announcements.first().expect("one announcement");
         assert_eq!(first.headline, "Warren production is open");
-        assert!(
-            first.voucher_offer,
-            "the voucher flag drives the second, wallet-signed call"
+        assert_eq!(
+            first.voucher_campaign_id.as_deref(),
+            Some("prod-launch"),
+            "the campaign id IS the offer, and is what the second, wallet-signed call needs"
         );
         assert_eq!(
             first.displayable_cta().map(|c| c.url.as_str()),
@@ -519,8 +518,8 @@ mod tests {
         );
         assert_eq!(
             signed.signature_hex,
-            "f0cce1529d9e4ecc499fd90b7609a2acee5f2207a70897336767d88291d5414c\
-             b12c2a91f4bd8c0da2b9c0b2c3e0f7d27ae666ea13f0b955753fb792b69af80b",
+            "6881851966054f0b019de2af2843ac9bfaeb6dde8855a5f041af97e692289f9b\
+             55f83e7614df02ff05bd6c9411c09077c20023e7410a5d14c2cd168817d8df0e",
             "frozen canonical signature"
         );
     }

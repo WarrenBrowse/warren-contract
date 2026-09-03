@@ -114,17 +114,31 @@ fn the_pinned_document_verifies_and_renders_what_the_vector_declares() {
     let active = verified.active_for(v.envelope.signed_at, Some("1.2.0"));
     assert_eq!(
         active.len(),
-        2,
-        "both pinned announcements target a 1.2.0 client"
+        3,
+        "every pinned announcement targets a 1.2.0 client"
     );
     assert_eq!(
         active[0].displayable_cta().map(|c| c.url.as_str()),
         Some("https://download.example.test/warren"),
         "the pinned CTA is an https link with no credentials, so it stays clickable"
     );
+    assert_eq!(
+        active[0].voucher_campaign_id.as_deref(),
+        Some("prod-launch"),
+        "the campaign id IS the offer, so the client knows which voucher to go and claim"
+    );
     assert!(
         active[1].displayable_cta().is_none(),
         "the pinned minimal announcement carries no CTA"
+    );
+    assert!(
+        !active[1].offers_voucher(),
+        "no campaign id is no offer, with no second state to disagree with it"
+    );
+    assert_eq!(
+        active[2].displayable_cta().map(|c| c.url.as_str()),
+        Some("https://download.example.test/terms?a=1&b=2"),
+        "a CTA carrying two query parameters keeps its ampersand and stays clickable"
     );
 
     assert!(
@@ -132,5 +146,33 @@ fn the_pinned_document_verifies_and_renders_what_the_vector_declares() {
             .active_for(v.envelope.expires_at, Some("1.2.0"))
             .is_empty(),
         "anti-freeze: at the pinned expiry the corpus document shows nothing"
+    );
+}
+
+/// The corpus body is deliberately hostile to a naive JSON encoder. This
+/// asserts the bytes an implementation has to reproduce, so a language
+/// whose encoder escapes `&`, `<`, `>` or non-ASCII by default fails with
+/// the reason in front of it rather than with a bare `BadSignature`.
+#[test]
+fn the_signed_bytes_carry_raw_utf8_and_unescaped_html_characters() {
+    let v = vector();
+    let body = &v.announcements[2].body;
+
+    assert!(
+        body.contains('&') && body.contains('<') && body.contains('>'),
+        "Go's encoding/json escapes these three by default: the corpus must carry them"
+    );
+    assert!(
+        !body.is_ascii(),
+        "Python json.dumps and Jackson's ESCAPE_NON_ASCII emit \\uXXXX here: the corpus \
+         must carry a character that exposes it"
+    );
+    assert!(
+        !v.canonical_preimage_utf8.contains("\\u"),
+        "the canonical preimage is raw UTF-8: not one character is \\uXXXX-escaped"
+    );
+    assert!(
+        v.canonical_preimage_utf8.contains(body.as_str()),
+        "the signed preimage embeds the body byte for byte, unescaped"
     );
 }

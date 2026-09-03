@@ -3090,12 +3090,20 @@ pub struct Announcement {
     pub level: NoticeLevel,
     /// Optional call to action.
     pub cta: Option<AnnouncementCta>,
-    /// Campaign this announcement belongs to, when it carries an offer.
-    /// The id a client passes to `GET /v1/campaign/{id}/voucher`.
-    pub campaign_id: Option<String>,
-    /// True when the campaign hands the account a voucher code, so the
-    /// client knows to make the second, wallet-signed call.
-    pub voucher_offer: bool,
+    /// Campaign whose voucher this announcement offers, and the id the
+    /// client passes to `GET /v1/campaign/{id}/voucher`. `None` = the
+    /// announcement carries no offer.
+    ///
+    /// One field rather than an id beside a boolean: the pair could
+    /// express "there is a voucher, with no id to ask for it", which
+    /// signs and verifies like any other announcement and leaves the
+    /// client with a voucher block it can never fill. Here the offer IS
+    /// the id, so that state cannot be written, sent or parsed.
+    ///
+    /// A plain wire string, like the CTA URL: what a campaign id is
+    /// allowed to look like is a publication-time rule, and a client that
+    /// refused an unexpected one would drop the whole signed document.
+    pub voucher_campaign_id: Option<String>,
     /// Minimum client version this announcement applies to (inclusive).
     /// `None` = all versions.
     pub min_client_version: Option<String>,
@@ -3120,6 +3128,13 @@ impl Announcement {
         self.cta
             .as_ref()
             .filter(|cta| validate_cta_url(&cta.url).is_ok())
+    }
+
+    /// Whether the client should make the second, wallet-signed call to
+    /// `GET /v1/campaign/{id}/voucher` and render a voucher block.
+    #[must_use]
+    pub fn offers_voucher(&self) -> bool {
+        self.voucher_campaign_id.is_some()
     }
 }
 
@@ -5363,8 +5378,7 @@ mod tests {
                 label: "Open the download page".to_owned(),
                 url: "https://warren.ro/download".to_owned(),
             }),
-            campaign_id: Some("prod-launch".to_owned()),
-            voucher_offer: true,
+            voucher_campaign_id: Some("prod-launch".to_owned()),
             min_client_version: Some("1.1.0".to_owned()),
             max_client_version: Some("2.0.0".to_owned()),
             expires_at: Some(1_700_021_600),
@@ -5378,8 +5392,7 @@ mod tests {
             body: "The API is unavailable tonight.".to_owned(),
             level: NoticeLevel::Warning,
             cta: None,
-            campaign_id: None,
-            voucher_offer: false,
+            voucher_campaign_id: None,
             min_client_version: None,
             max_client_version: None,
             expires_at: None,
@@ -5399,8 +5412,7 @@ mod tests {
                     "label": "Open the download page",
                     "url": "https://warren.ro/download"
                 },
-                "campaign_id": "prod-launch",
-                "voucher_offer": true,
+                "voucher_campaign_id": "prod-launch",
                 "min_client_version": "1.1.0",
                 "max_client_version": "2.0.0",
                 "expires_at": 1_700_021_600
@@ -5419,13 +5431,24 @@ mod tests {
                 "body": "The API is unavailable tonight.",
                 "level": "warning",
                 "cta": null,
-                "campaign_id": null,
-                "voucher_offer": false,
+                "voucher_campaign_id": null,
                 "min_client_version": null,
                 "max_client_version": null,
                 "expires_at": null
             }),
             "absent optionals stay explicit nulls, exactly as Notice encodes them"
+        );
+    }
+
+    #[test]
+    fn the_offer_is_the_campaign_id_so_it_cannot_be_promised_without_one() {
+        assert!(
+            full_announcement().offers_voucher(),
+            "a campaign id present is an offer the client can go and claim"
+        );
+        assert!(
+            !minimal_announcement().offers_voucher(),
+            "no campaign id is no offer: there is no third state to render"
         );
     }
 
@@ -5445,6 +5468,10 @@ mod tests {
             "http://warren.ro/download",
             "javascript:alert(1)",
             "file:///etc/passwd",
+            // A data URL renders attacker-authored markup under the app's
+            // own chrome, so it stays refused even if this guard is ever
+            // relaxed into a scheme allowlist.
+            "data:text/html;base64,PHNjcmlwdD4x",
             "HTTPS://warren.ro/download",
             "//warren.ro/download",
         ] {
