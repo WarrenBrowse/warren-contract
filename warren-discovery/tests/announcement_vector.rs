@@ -15,7 +15,7 @@ use warren_discovery_core::{
 #[derive(serde::Deserialize)]
 struct Vector {
     version: u32,
-    signer: Signer_,
+    signer: VectorSigner,
     envelope: Envelope,
     announcements: Vec<Announcement>,
     canonical_preimage_utf8: String,
@@ -24,8 +24,7 @@ struct Vector {
 }
 
 #[derive(serde::Deserialize)]
-#[allow(non_camel_case_types)]
-struct Signer_ {
+struct VectorSigner {
     signing_key_hex: String,
     server_pubkey_hex: String,
 }
