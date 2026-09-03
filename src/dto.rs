@@ -3064,6 +3064,16 @@ pub struct AnnouncementCta {
 /// makes every notice fail signature verification and the client shows
 /// nothing at all. An announcement therefore rides its own envelope and
 /// its own version, and the notices wire stays untouched.
+///
+/// The optionals here serialize as explicit `null` rather than following
+/// this module's `skip_serializing_if` house rule, which applies to
+/// ordinary request and response bodies. This struct is embedded in a
+/// canonical **signing preimage**, so every implementation in every
+/// language has to reproduce its bytes exactly; a key that disappears
+/// when its value is absent is one more rule each of them can get wrong,
+/// and getting it wrong is a signature failure that shows the user
+/// nothing. `Notice` encodes its optionals the same way, so the two
+/// broadcast documents also stay readable side by side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Announcement {
     /// Unique announcement identifier (hex, server-assigned). Clients
