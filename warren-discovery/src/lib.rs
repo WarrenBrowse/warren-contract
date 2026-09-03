@@ -23,6 +23,7 @@ mod json_io;
 mod multihop_directory;
 mod notices;
 mod path_aware;
+mod pick;
 mod query;
 mod relay;
 mod roster;
@@ -55,6 +56,10 @@ pub use path_aware::{
     EntryPathQuality, LegQuality, PATH_QUALITY_DEGRADED_RTT_MS, PATH_QUALITY_VERSION,
     PathAwareParams, PathQualityAdvisory, entry_rtt_from, node_rtt_from, pick_circuit_by_weight,
     select_circuit_path_aware, select_entry_path_aware,
+};
+pub use pick::{
+    Continent, EntryCandidate, ExitCandidate, continent_of_country, pick_entry, pick_exit,
+    prefer_client_continent,
 };
 pub use query::{IpAvailability, LocationConstraint, WarrenRelayQuery};
 pub use relay::{

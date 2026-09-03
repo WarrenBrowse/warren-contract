@@ -1,0 +1,198 @@
+{
+  "version": 1,
+  "exit": [
+    {
+      "name": "empty_candidates_yield_none",
+      "candidates": [],
+      "expected": null
+    },
+    {
+      "name": "single_candidate_is_picked_whatever_its_weight",
+      "candidates": [
+        { "weight": 0, "exit_id": "00000000000000000000000000000001" }
+      ],
+      "expected": 0
+    },
+    {
+      "name": "highest_weight_wins_regardless_of_position",
+      "candidates": [
+        { "weight": 10, "exit_id": "0000000000000000000000000000000a" },
+        { "weight": 50, "exit_id": "0000000000000000000000000000000b" },
+        { "weight": 20, "exit_id": "0000000000000000000000000000000c" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "equal_weights_break_on_the_smallest_exit_id",
+      "candidates": [
+        { "weight": 100, "exit_id": "0000000000000000000000000000000b" },
+        { "weight": 100, "exit_id": "0000000000000000000000000000000a" },
+        { "weight": 100, "exit_id": "0000000000000000000000000000000c" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "zero_weights_still_pick_the_smallest_exit_id",
+      "candidates": [
+        { "weight": 0, "exit_id": "00000000000000000000000000000003" },
+        { "weight": 0, "exit_id": "00000000000000000000000000000001" },
+        { "weight": 0, "exit_id": "00000000000000000000000000000002" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "exit_id_order_is_byte_lexicographic",
+      "candidates": [
+        { "weight": 5, "exit_id": "00000000000000000000000000000100" },
+        { "weight": 5, "exit_id": "000000000000000000000000000000ff" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "weights_are_compared_never_summed",
+      "candidates": [
+        { "weight": 18446744073709551615, "exit_id": "00000000000000000000000000000002" },
+        { "weight": 18446744073709551614, "exit_id": "00000000000000000000000000000001" }
+      ],
+      "expected": 0
+    },
+    {
+      "name": "a_full_tie_keeps_the_first_index",
+      "candidates": [
+        { "weight": 7, "exit_id": "00000000000000000000000000000005" },
+        { "weight": 7, "exit_id": "00000000000000000000000000000005" }
+      ],
+      "expected": 0
+    }
+  ],
+  "entry": [
+    {
+      "name": "empty_candidates_yield_none",
+      "client_continent": "europe",
+      "candidates": [],
+      "expected": null
+    },
+    {
+      "name": "no_client_continent_keeps_the_pure_weight_order",
+      "client_continent": null,
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "sg" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "de" },
+        { "weight": 50, "node_id": "00000000000000000000000000000003", "country": "nl" }
+      ],
+      "expected": 0
+    },
+    {
+      "name": "same_continent_entry_beats_a_heavier_cross_continent_one",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "sg" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "de" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "weight_ranks_within_the_local_partition",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "sg" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "de" },
+        { "weight": 50, "node_id": "00000000000000000000000000000003", "country": "nl" }
+      ],
+      "expected": 2
+    },
+    {
+      "name": "no_local_entry_falls_back_to_the_whole_set",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 10, "node_id": "00000000000000000000000000000001", "country": "sg" },
+        { "weight": 20, "node_id": "00000000000000000000000000000002", "country": "us" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "local_ties_break_on_the_smallest_node_id",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 5, "node_id": "00000000000000000000000000000003", "country": "fr" },
+        { "weight": 5, "node_id": "00000000000000000000000000000002", "country": "de" },
+        { "weight": 9, "node_id": "00000000000000000000000000000001", "country": "us" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "an_unknown_country_is_never_local",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "zz" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "fr" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "country_code_case_is_ignored",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "SG" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "NL" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "turkey_sits_with_europe",
+      "client_continent": "europe",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "us" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "tr" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "zero_weight_local_entries_still_beat_off_continent_ones",
+      "client_continent": "asia",
+      "candidates": [
+        { "weight": 0, "node_id": "00000000000000000000000000000002", "country": "jp" },
+        { "weight": 0, "node_id": "00000000000000000000000000000001", "country": "sg" },
+        { "weight": 100, "node_id": "00000000000000000000000000000003", "country": "de" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "americas_client_prefers_an_americas_entry",
+      "client_continent": "americas",
+      "candidates": [
+        { "weight": 1, "node_id": "00000000000000000000000000000001", "country": "de" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "br" },
+        { "weight": 1, "node_id": "00000000000000000000000000000003", "country": "us" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "oceania_client_prefers_an_oceania_entry",
+      "client_continent": "oceania",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "za" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "au" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "africa_client_prefers_an_africa_entry",
+      "client_continent": "africa",
+      "candidates": [
+        { "weight": 100, "node_id": "00000000000000000000000000000001", "country": "au" },
+        { "weight": 1, "node_id": "00000000000000000000000000000002", "country": "ke" }
+      ],
+      "expected": 1
+    },
+    {
+      "name": "a_full_tie_keeps_the_first_index",
+      "client_continent": null,
+      "candidates": [
+        { "weight": 3, "node_id": "00000000000000000000000000000004", "country": "de" },
+        { "weight": 3, "node_id": "00000000000000000000000000000004", "country": "de" }
+      ],
+      "expected": 0
+    }
+  ]
+}
