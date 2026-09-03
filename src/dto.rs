@@ -3176,6 +3176,192 @@ pub fn validate_cta_url(url: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// The voucher campaign an announcement carries, as submitted to
+/// `POST /v1/admin/announcements`.
+///
+/// The campaign id and the pool travel inside one optional object so a
+/// pool with no campaign to look it up under, and a campaign with no
+/// pool, are both unrepresentable, exactly as [`Announcement`] makes the
+/// offer be the campaign id.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminAnnouncementCampaign {
+    /// Campaign id clients pass to `GET /v1/campaign/{id}/voucher`.
+    pub campaign_id: String,
+    /// Voucher codes minted by ANOTHER Warren deployment (production)
+    /// and supplied by the operator, one per cohort member with a strict
+    /// margin. Each entry is a bearer token worth a month of service, so
+    /// it belongs in this request body and in the one response that
+    /// hands a code to the account that owns it, nowhere else.
+    pub pool: Vec<String>,
+}
+
+impl std::fmt::Debug for AdminAnnouncementCampaign {
+    /// Renders the campaign and the pool size, never a code: an error
+    /// path that formats the request would otherwise write a whole pool
+    /// of production bearer tokens to a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminAnnouncementCampaign")
+            .field("campaign_id", &self.campaign_id)
+            .field("pool_size", &self.pool.len())
+            .finish()
+    }
+}
+
+/// Admin request body for `POST /v1/admin/announcements`.
+///
+/// The announcement id and the `voucher_campaign_id` the clients see are
+/// both server-assigned: an announcement offers a voucher if and only if
+/// a campaign was published with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminPublishAnnouncementRequest {
+    /// One-line title, plain text rendered verbatim, at most
+    /// [`MAX_ANNOUNCEMENT_HEADLINE_LEN`] characters.
+    pub headline: String,
+    /// Body text, plain text rendered verbatim, at most
+    /// [`MAX_ANNOUNCEMENT_BODY_LEN`] characters.
+    pub body: String,
+    /// Severity level, shared with the notices.
+    pub level: NoticeLevel,
+    /// Optional call to action. The URL is checked against
+    /// [`validate_cta_url`] at publication, so an unsafe link is refused
+    /// to the operator rather than withheld from every reader.
+    pub cta: Option<AnnouncementCta>,
+    /// Voucher campaign, when the announcement carries an offer.
+    pub campaign: Option<AdminAnnouncementCampaign>,
+    /// Minimum client version this announcement applies to.
+    pub min_client_version: Option<String>,
+    /// Maximum client version this announcement applies to.
+    pub max_client_version: Option<String>,
+    /// Unix timestamp after which clients stop showing it. Doubles as
+    /// the campaign deadline, which is why a voucher-bearing
+    /// announcement is refused without one.
+    pub expires_at: Option<u64>,
+}
+
+/// Response body of an accepted `POST /v1/admin/announcements`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminPublishAnnouncementResponse {
+    /// The stored announcement, with its server-assigned id.
+    pub announcement: Announcement,
+    /// Accounts that were granted a code. `0` without a campaign.
+    pub cohort_size: u64,
+    /// Codes the pool held, strictly greater than `cohort_size`. `0`
+    /// without a campaign.
+    pub pool_size: u64,
+}
+
+/// Why `POST /v1/admin/announcements` refused a publication.
+///
+/// A structural refusal rather than a fault: nothing was written, and
+/// the operator can act on every variant. Internally tagged so the panel
+/// switches on `reason` instead of matching a sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AnnouncementRefusal {
+    /// The pool is not strictly larger than the cohort, so at least one
+    /// account would be left without a code. Only counts are reported:
+    /// they are the operator's whole diagnostic and carry no identity.
+    PoolTooSmall {
+        /// Codes the operator supplied.
+        pool: u64,
+        /// Accounts known at that instant.
+        cohort: u64,
+    },
+    /// A code appears twice, in the submitted pool or across campaigns.
+    DuplicateCode,
+    /// A code is not a canonical Warren voucher code.
+    MalformedCode,
+    /// A voucher-bearing announcement carries no expiry, so the
+    /// retention sweep could never purge its pool or its grants.
+    CampaignNeedsDeadline,
+    /// The campaign already has a published announcement and pool.
+    CampaignExists,
+}
+
+/// Body served with a refused `POST /v1/admin/announcements`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminAnnouncementRefusalResponse {
+    /// The machine-readable outcome the panel renders.
+    #[serde(flatten)]
+    pub refusal: AnnouncementRefusal,
+    /// Human-readable sentence, counts only, for a `curl` operator and
+    /// for a panel that has no rendering for a variant yet.
+    pub error: String,
+}
+
+/// One row of `GET /v1/admin/announcements`: the public fields plus the
+/// publication time. Expired rows are included so the operator sees what
+/// a client stopped showing and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminAnnouncement {
+    /// Server-assigned identifier, as accepted by
+    /// `DELETE /v1/admin/announcements/{id}`.
+    pub id: String,
+    /// One-line title.
+    pub headline: String,
+    /// Body text.
+    pub body: String,
+    /// Severity level.
+    pub level: NoticeLevel,
+    /// Optional call to action.
+    pub cta: Option<AnnouncementCta>,
+    /// Campaign whose voucher this announcement offers, if any. Its
+    /// presence IS the offer, exactly as on the client wire.
+    pub voucher_campaign_id: Option<String>,
+    /// Minimum client version this announcement applies to.
+    pub min_client_version: Option<String>,
+    /// Maximum client version this announcement applies to.
+    pub max_client_version: Option<String>,
+    /// Unix timestamp after which clients stop showing it.
+    pub expires_at: Option<u64>,
+    /// Unix timestamp the announcement was published.
+    pub created_at: u64,
+}
+
+/// Response for `GET /v1/admin/announcements`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminAnnouncementsResponse {
+    /// Every stored announcement, newest first.
+    pub announcements: Vec<AdminAnnouncement>,
+    /// Monotonic content version clients gate on.
+    pub generation: u64,
+}
+
+/// Response for `GET /v1/admin/campaigns/{campaign_id}/counters`.
+///
+/// Counts only. A code never leaves the store through this path, so the
+/// operator screen cannot become a place where a bearer token is read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignCountersResponse {
+    /// Codes the operator supplied.
+    pub pool_size: u64,
+    /// Codes handed to a cohort member.
+    pub assigned: u64,
+    /// Accounts in the cohort snapshot. Equal to `assigned` by
+    /// construction, so a divergence is a bug worth seeing.
+    pub cohort_size: u64,
+}
+
+/// Response for the wallet-signed `GET /v1/campaign/{campaign_id}/voucher`.
+///
+/// The code is in the canonical dash-less form: presentation (the
+/// `XXXX-XXXX-XXXX-XXXX` grouping) belongs to the client that renders it,
+/// and every redeeming backend normalises before it looks a code up.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CampaignVoucherResponse {
+    /// The code granted to the authenticated account, and to no other.
+    pub code: String,
+}
+
+impl std::fmt::Debug for CampaignVoucherResponse {
+    /// Renders no part of the code: a redacted prefix would still be a
+    /// meaningful head start against an 80-bit secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CampaignVoucherResponse(redacted)")
+    }
+}
+
 /// Admin request body for `POST /v1/admin/notices`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminCreateNoticeRequest {
@@ -5557,5 +5743,165 @@ mod tests {
             a.displayable_cta().is_none(),
             "a signed but unsafe link must not become a button, and must not hide the announcement"
         );
+    }
+
+    fn publish_request_with_campaign() -> AdminPublishAnnouncementRequest {
+        AdminPublishAnnouncementRequest {
+            headline: "Warren production is open".to_owned(),
+            body: "Your beta account gets one free month on production.".to_owned(),
+            level: NoticeLevel::Info,
+            cta: Some(AnnouncementCta {
+                label: "Open the download page".to_owned(),
+                url: "https://warren.ro/download".to_owned(),
+            }),
+            campaign: Some(AdminAnnouncementCampaign {
+                campaign_id: "prod-launch".to_owned(),
+                pool: vec!["ABCDEFGHJKMNPQRS".to_owned(), "0123456789ABCDEF".to_owned()],
+            }),
+            min_client_version: None,
+            max_client_version: None,
+            expires_at: Some(1_700_021_600),
+        }
+    }
+
+    #[test]
+    fn a_publish_request_round_trips_through_the_wire() {
+        let mut without = publish_request_with_campaign();
+        without.campaign = None;
+        for req in [publish_request_with_campaign(), without] {
+            let json = serde_json::to_string(&req).expect("serialize");
+            let back: AdminPublishAnnouncementRequest =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, req, "the admin panel and warren-api share this shape");
+        }
+    }
+
+    #[test]
+    fn the_pool_travels_with_the_campaign_it_belongs_to() {
+        let json = serde_json::to_value(publish_request_with_campaign()).expect("serialize");
+        assert_eq!(
+            json["campaign"]["campaign_id"], "prod-launch",
+            "one optional object, so a pool without a campaign to look it up under, \
+             and a campaign with no pool, are both unrepresentable"
+        );
+        assert_eq!(json["campaign"]["pool"].as_array().expect("pool").len(), 2);
+    }
+
+    #[test]
+    fn a_campaign_never_renders_a_code_in_its_debug() {
+        let campaign = AdminAnnouncementCampaign {
+            campaign_id: "prod-launch".to_owned(),
+            pool: vec!["ABCDEFGHJKMNPQRS".to_owned()],
+        };
+        let rendered = format!("{campaign:?}");
+        assert!(
+            !rendered.contains("ABCDEFGHJKMNPQRS"),
+            "a pool entry is a production bearer token, and a panel error path \
+             that formats the request would otherwise write it to a log: {rendered}"
+        );
+        assert!(
+            rendered.contains("prod-launch") && rendered.contains('1'),
+            "the campaign and the pool size are the whole diagnostic: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_publish_request_debug_carries_no_code_either() {
+        let rendered = format!("{:?}", publish_request_with_campaign());
+        assert!(
+            !rendered.contains("ABCDEFGHJKMNPQRS"),
+            "the request wraps the campaign, so it must not undo its redaction: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_granted_code_never_renders_in_debug() {
+        let response = CampaignVoucherResponse {
+            code: "ABCDEFGHJKMNPQRS".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&response).expect("serialize")["code"],
+            "ABCDEFGHJKMNPQRS",
+            "the account that owns the code is the one place it belongs"
+        );
+        assert!(
+            !format!("{response:?}").contains("ABCDEFGHJKMNPQRS"),
+            "everywhere else, including a Debug in an error path, it stays out"
+        );
+    }
+
+    #[test]
+    fn a_refusal_carries_counts_and_a_machine_reason() {
+        let json = serde_json::to_value(AdminAnnouncementRefusalResponse {
+            refusal: AnnouncementRefusal::PoolTooSmall { pool: 3, cohort: 3 },
+            error: "voucher pool of 3 must be strictly larger than the cohort of 3".to_owned(),
+        })
+        .expect("serialize");
+
+        assert_eq!(
+            json["reason"], "pool_too_small",
+            "the panel renders the outcome from this token, not from the sentence"
+        );
+        assert_eq!(json["pool"], 3);
+        assert_eq!(json["cohort"], 3);
+    }
+
+    #[test]
+    fn every_refusal_reason_is_a_distinct_token() {
+        let tokens: Vec<String> = [
+            AnnouncementRefusal::PoolTooSmall { pool: 1, cohort: 1 },
+            AnnouncementRefusal::DuplicateCode,
+            AnnouncementRefusal::MalformedCode,
+            AnnouncementRefusal::CampaignNeedsDeadline,
+            AnnouncementRefusal::CampaignExists,
+        ]
+        .into_iter()
+        .map(|r| {
+            serde_json::to_value(r).expect("serialize")["reason"]
+                .as_str()
+                .expect("tagged")
+                .to_owned()
+        })
+        .collect();
+        let unique: std::collections::BTreeSet<&String> = tokens.iter().collect();
+        assert_eq!(
+            unique.len(),
+            tokens.len(),
+            "an operator who cannot tell two refusals apart retries the wrong fix: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn the_admin_listing_and_the_counters_round_trip() {
+        let listing = AdminAnnouncementsResponse {
+            announcements: vec![AdminAnnouncement {
+                id: "0000000000000001".to_owned(),
+                headline: "Warren production is open".to_owned(),
+                body: "one free month".to_owned(),
+                level: NoticeLevel::Info,
+                cta: None,
+                voucher_campaign_id: Some("prod-launch".to_owned()),
+                min_client_version: None,
+                max_client_version: None,
+                expires_at: Some(1_700_021_600),
+                created_at: 1_700_000_000,
+            }],
+            generation: 4,
+        };
+        let back: AdminAnnouncementsResponse =
+            serde_json::from_str(&serde_json::to_string(&listing).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(back, listing);
+
+        let counters = CampaignCountersResponse {
+            pool_size: 12,
+            assigned: 11,
+            cohort_size: 11,
+        };
+        let json = serde_json::to_value(counters).expect("serialize");
+        assert_eq!(json.as_object().expect("object").len(), 3);
+        assert_eq!(json["pool_size"], 12);
+        assert_eq!(json["assigned"], 11);
+        assert_eq!(json["cohort_size"], 11);
     }
 }
