@@ -984,6 +984,7 @@ mod tests {
             relay_id: [0x11; 16],
             relay_ed25519_pubkey: [0x22; 32],
             endpoint: "198.51.100.7:443".parse().expect("addr"),
+            endpoint_v6: None,
             cover_domain: Some("ro1.edge.example.net".to_owned()),
             tcp_fallback: true,
             signature: [0xee; 64],

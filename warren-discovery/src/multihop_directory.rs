@@ -1032,6 +1032,7 @@ pub mod test_helpers {
             relay_id,
             relay_ed25519_pubkey: relay_ed,
             endpoint,
+            endpoint_v6: None,
             cover_domain: None,
             tcp_fallback: false,
             signature: relay_sig,
@@ -1152,6 +1153,7 @@ mod tests {
             relay_id,
             relay_ed25519_pubkey: relay_ed,
             endpoint,
+            endpoint_v6: None,
             cover_domain: None,
             tcp_fallback: false,
             signature: relay_sig,
@@ -1717,6 +1719,39 @@ mod tests {
         let upper_root = hexk(&root).to_ascii_uppercase();
         verify_multihop_directory_any(&json, &[&upper_server], &[&upper_root])
             .expect("pins differing only in hex case must still be accepted");
+    }
+
+    #[test]
+    fn a_relays_second_address_family_survives_verification() {
+        // The server publishes a v6 dial address for a node that binds one
+        // (`relay.endpoint_v6`), so a client whose network hands out no IPv4
+        // has something to dial. It rides INSIDE the server envelope, so it is
+        // signed rather than merely transported, and it must reach the caller
+        // intact: a verifier that dropped it would leave that client with the
+        // v4 address it cannot use.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut node = signed_node(&op, 1, "fr", 1);
+        let v6: SocketAddr = "[2001:db8::10]:443".parse().unwrap();
+        node.relay.endpoint_v6 = Some(v6);
+        let signed = build(&root, &op, &server, vec![node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let verified = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("a dual-stack directory must verify like any other");
+        assert_eq!(verified.nodes[0].relay.endpoint_v6, Some(v6));
+    }
+
+    #[test]
+    fn a_v4_only_directory_stays_byte_identical_to_the_legacy_shape() {
+        // The field is absent on the wire unless a node publishes one, which
+        // is what keeps every already-signed directory, and the frozen
+        // cross-SDK vector, verifying unchanged.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        assert!(
+            !json.contains("endpoint_v6"),
+            "a v4-only directory must not grow a key, got: {json}"
+        );
     }
 
     #[test]

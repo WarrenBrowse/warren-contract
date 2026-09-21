@@ -223,6 +223,7 @@ mod tests {
                 relay_id: [tag; 16],
                 relay_ed25519_pubkey: [tag; 32],
                 endpoint,
+                endpoint_v6: None,
                 cover_domain: None,
                 tcp_fallback: false,
                 signature: [0; 64],
