@@ -1797,6 +1797,54 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_field_in_a_node_breaks_the_envelope_signature() {
+        // THE constraint this format imposes, and the one that cost a live
+        // fleet five minutes on 2026-09-21: the envelope signature is verified
+        // against a RE-SERIALIZATION of the parsed nodes, never against the
+        // bytes received. A field a consumer's build does not know is dropped
+        // at parse and missing from that re-serialization, so the signature
+        // cannot match. "Additive" therefore means "additive once every
+        // consumer already parses it": a server may not emit a new field on a
+        // route older builds read, whatever `skip_serializing_if` suggests.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let signed = build(&root, &op, &server, vec![signed_node(&op, 1, "fr", 1)]);
+        let json = serde_json::to_string(&signed).unwrap();
+        verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("the untouched directory verifies");
+
+        // A newer server signs a node carrying a field this build knows
+        // (`endpoint_v6` stands in for any later one), then an OLDER parser
+        // reads it: serde drops what it does not know, so its canonical form
+        // is the body MINUS that field. Stripping it from the JSON is exactly
+        // that parser's view, and it is the wire condition, not a tampering.
+        let mut dual = signed_node(&op, 1, "fr", 1);
+        dual.relay.endpoint_v6 = Some("[2001:db8::10]:443".parse().unwrap());
+        let signed_with_field = build(&root, &op, &server, vec![dual]);
+        let json_with_field = serde_json::to_string(&signed_with_field).unwrap();
+        verify_multihop_directory_any(&json_with_field, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("a build that KNOWS the field verifies it");
+
+        let mut older_view: serde_json::Value = serde_json::from_str(&json_with_field).unwrap();
+        older_view["nodes"][0]["relay"]
+            .as_object_mut()
+            .unwrap()
+            .remove("endpoint_v6");
+        let as_an_older_parser_sees_it = serde_json::to_string(&older_view).unwrap();
+
+        let err = verify_multihop_directory_any(
+            &as_an_older_parser_sees_it,
+            &[&hexk(&server)],
+            &[&hexk(&root)],
+        )
+        .expect_err("a build that does not know the field must fail the envelope signature");
+        assert!(
+            matches!(err, DirectoryError::BadEnvelopeSignature),
+            "the failure is the signature itself, which is why a new field cannot ship as \
+             additive on a live route, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn a_v4_only_directory_stays_byte_identical_to_the_legacy_shape() {
         // The field is absent on the wire unless a node publishes one, which
         // is what keeps every already-signed directory, and the frozen
