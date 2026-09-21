@@ -867,3 +867,522 @@ fn session_open_request_carries_max_devices_when_present() {
     );
     roundtrips(&req);
 }
+
+// ---------------------------------------------------------------------------
+// Crypto payment rails (doc 91). Settlement lives in warren-core (BTCPay
+// webhook, monerod/wallet-rpc and the polkadot/solana RPC watchers); what
+// this crate owns is the wire surface every rail shares: the payment-method
+// tokens, the pending-voucher metadata, the wpid support lookup, the
+// node-health probe and the crypto refund row. A drift in any of these
+// breaks the backend and the admin/SDK consumers at once.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn payment_method_wire_tokens_cover_every_rail() {
+    // The lowercase token IS the wire format: a rename or a case change
+    // is a breaking compat regression on both sides.
+    let all = [
+        (PaymentMethod::Lightning, "lightning"),
+        (PaymentMethod::Monero, "monero"),
+        (PaymentMethod::Card, "card"),
+        (PaymentMethod::Cash, "cash"),
+        (PaymentMethod::Bitcoin, "bitcoin"),
+        (PaymentMethod::Manual, "manual"),
+        (PaymentMethod::AppStore, "appstore"),
+        (PaymentMethod::GooglePlay, "googleplay"),
+        (PaymentMethod::Paypal, "paypal"),
+        (PaymentMethod::Polkadot, "polkadot"),
+        (PaymentMethod::Solana, "solana"),
+    ];
+    for (method, wire) in all {
+        assert_eq!(json(&method), serde_json::json!(wire));
+        assert_eq!(method.as_wire(), wire);
+        assert_eq!(PaymentMethod::from_wire(wire).unwrap(), method);
+        assert_eq!(method.to_string(), wire);
+        roundtrips(&method);
+    }
+}
+
+#[test]
+fn payment_method_rejects_an_unknown_token_redacted() {
+    // The rejected value is untrusted (could be a mispasted secret), so
+    // the error carries only the 8-char redacted prefix.
+    let err = PaymentMethod::from_wire("a-very-long-mispasted-secret-value").unwrap_err();
+    assert_eq!(err.to_string(), "unknown payment method: a-very-l…");
+}
+
+#[test]
+fn currency_wire_tokens_are_uppercase() {
+    // UPPERCASE is part of the wire contract; pricing maps the token to
+    // its smallest unit (cent, satoshi, piconero, planck, lamport).
+    let all = [
+        (Currency::EUR, "EUR"),
+        (Currency::USD, "USD"),
+        (Currency::BTC, "BTC"),
+        (Currency::XMR, "XMR"),
+        (Currency::SAT, "SAT"),
+        (Currency::RON, "RON"),
+        (Currency::CAD, "CAD"),
+        (Currency::GBP, "GBP"),
+        (Currency::CHF, "CHF"),
+        (Currency::DOT, "DOT"),
+        (Currency::SOL, "SOL"),
+    ];
+    for (currency, wire) in all {
+        assert_eq!(json(&currency), serde_json::json!(wire));
+        assert_eq!(currency.as_wire(), wire);
+        roundtrips(&currency);
+    }
+}
+
+#[test]
+fn admin_pending_voucher_row_carries_the_crypto_rail_metadata() {
+    // One row per rail the store records: the PSP-minted (btcpay) rows
+    // settle in SAT, the self-hosted watchers in their native unit.
+    let row = AdminPendingVoucherRow {
+        pending_id: "pv_lightning_01".to_owned(),
+        expires_at: 1_700_086_400,
+        provider: Some("btcpay".to_owned()),
+        currency: Some("SAT".to_owned()),
+        amount_units: Some(150_000),
+    };
+    assert_eq!(
+        json(&row),
+        serde_json::json!({
+            "pending_id": "pv_lightning_01",
+            "expires_at": 1_700_086_400u64,
+            "provider": "btcpay",
+            "currency": "SAT",
+            "amount_units": 150_000u64,
+        })
+    );
+    roundtrips(&row);
+
+    for (provider, currency, units) in [
+        ("monero", "XMR", 423_000_000_000u64),
+        ("solana", "SOL", 5_000_000_000u64),
+        ("polkadot", "DOT", 750_000_000_000u64),
+    ] {
+        let row = AdminPendingVoucherRow {
+            pending_id: format!("pv_{provider}_01"),
+            expires_at: 1_700_086_400,
+            provider: Some(provider.to_owned()),
+            currency: Some(currency.to_owned()),
+            amount_units: Some(units),
+        };
+        let v = json(&row);
+        assert_eq!(v["provider"], provider);
+        assert_eq!(v["currency"], currency);
+        assert_eq!(v["amount_units"], units);
+        roundtrips(&row);
+    }
+}
+
+#[test]
+fn admin_pending_voucher_row_pre_metadata_fields_parse_and_serialize_as_null() {
+    // Rows recorded before the provider/currency metadata existed omit
+    // the fields; `serde(default)` keeps them parseable as None. But the
+    // attrs are parse-side only: this server still writes explicit nulls,
+    // so consumers may rely on the keys being present.
+    let legacy = serde_json::json!({
+        "pending_id": "pv_legacy_01",
+        "expires_at": 1_700_086_400u64,
+    });
+    let parsed: AdminPendingVoucherRow =
+        serde_json::from_value(legacy).expect("a pre-metadata row must deserialize");
+    assert_eq!(parsed.provider, None);
+    assert_eq!(parsed.currency, None);
+    assert_eq!(parsed.amount_units, None);
+    assert_eq!(
+        json(&parsed),
+        serde_json::json!({
+            "pending_id": "pv_legacy_01",
+            "expires_at": 1_700_086_400u64,
+            "provider": null,
+            "currency": null,
+            "amount_units": null,
+        }),
+        "None rail metadata serializes as explicit nulls, not omitted keys"
+    );
+}
+
+#[test]
+fn admin_pending_vouchers_response_shape() {
+    let resp = AdminPendingVouchersResponse {
+        pending: vec![AdminPendingVoucherRow {
+            pending_id: "pv_monero_01".to_owned(),
+            expires_at: 1_700_086_400,
+            provider: Some("monero".to_owned()),
+            currency: Some("XMR".to_owned()),
+            amount_units: Some(423_000_000_000),
+        }],
+        total: 1,
+    };
+    let v = json(&resp);
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["pending"].as_array().unwrap().len(), 1);
+    roundtrips(&resp);
+}
+
+#[test]
+fn admin_wpid_lookup_body_and_binding_row_shape() {
+    // POST body (not a query param) so the pull credential never lands
+    // in proxy access logs.
+    let body = AdminWpidLookupBody {
+        wpid: "wp_7f3a9c21".to_owned(),
+    };
+    assert_eq!(json(&body), serde_json::json!({ "wpid": "wp_7f3a9c21" }));
+    roundtrips(&body);
+
+    // A self-hosted rail binds the exact native amount quoted at invoice
+    // creation (piconero, lamport, planck); btcpay leaves it null because
+    // it is priced at settlement.
+    let monero_binding = AdminWpidInvoiceBindingRow {
+        rail: "monero".to_owned(),
+        expires_at_unix: Some(1_700_086_400),
+        locked_amount_native: Some(423_000_000_000),
+        granted_duration_secs: Some(2_592_000),
+    };
+    assert_eq!(
+        json(&monero_binding),
+        serde_json::json!({
+            "rail": "monero",
+            "expires_at_unix": 1_700_086_400u64,
+            "locked_amount_native": 423_000_000_000u64,
+            "granted_duration_secs": 2_592_000u64,
+        })
+    );
+    roundtrips(&monero_binding);
+
+    let btcpay_binding = AdminWpidInvoiceBindingRow {
+        rail: "btcpay".to_owned(),
+        expires_at_unix: None,
+        locked_amount_native: None,
+        granted_duration_secs: None,
+    };
+    assert_eq!(
+        json(&btcpay_binding),
+        serde_json::json!({
+            "rail": "btcpay",
+            "expires_at_unix": null,
+            "locked_amount_native": null,
+            "granted_duration_secs": null,
+        }),
+        "absent binding fields serialize as nulls, not omitted keys"
+    );
+    roundtrips(&btcpay_binding);
+}
+
+#[test]
+fn admin_wpid_lookup_response_covers_the_whole_lifecycle() {
+    // 1. Invoice open, nothing settled yet.
+    let open = AdminWpidLookupResponse {
+        bindings: vec![AdminWpidInvoiceBindingRow {
+            rail: "solana".to_owned(),
+            expires_at_unix: Some(1_700_086_400),
+            locked_amount_native: Some(5_000_000_000),
+            granted_duration_secs: Some(2_592_000),
+        }],
+        settled: false,
+        voucher_pull_pending: false,
+        voucher_redeemed: None,
+    };
+    let v = json(&open);
+    assert_eq!(v["settled"], false);
+    assert_eq!(v["voucher_pull_pending"], false);
+    assert_eq!(v["voucher_redeemed"], serde_json::Value::Null);
+    assert_eq!(v["bindings"].as_array().unwrap().len(), 1);
+    roundtrips(&open);
+
+    // 2. Paid, voucher minted and queued for pull (not yet retrieved).
+    let settled = AdminWpidLookupResponse {
+        bindings: vec![],
+        settled: true,
+        voucher_pull_pending: true,
+        voucher_redeemed: Some(false),
+    };
+    assert_eq!(
+        json(&settled),
+        serde_json::json!({
+            "bindings": [],
+            "settled": true,
+            "voucher_pull_pending": true,
+            "voucher_redeemed": false,
+        })
+    );
+    roundtrips(&settled);
+
+    // 3. Pulled and redeemed: the lifecycle's terminal state.
+    let redeemed = AdminWpidLookupResponse {
+        bindings: vec![],
+        settled: true,
+        voucher_pull_pending: false,
+        voucher_redeemed: Some(true),
+    };
+    assert_eq!(json(&redeemed)["voucher_redeemed"], true);
+    roundtrips(&redeemed);
+}
+
+#[test]
+fn admin_payment_nodes_health_covers_every_watched_rail() {
+    // One row per payment dependency warren-api probes. `node`/`status`
+    // are free-form tokens so a new rail needs no contract bump; these
+    // pin the five the crypto stack watches today.
+    let resp = AdminPaymentNodesHealthResponse {
+        nodes: vec![
+            AdminPaymentNodeHealthRow {
+                node: "btcpay".to_owned(),
+                status: "healthy".to_owned(),
+                detail: "invoice webhook ok".to_owned(),
+                checked_at_unix: Some(1_700_000_000),
+            },
+            AdminPaymentNodeHealthRow {
+                node: "monerod".to_owned(),
+                status: "healthy".to_owned(),
+                detail: "synced".to_owned(),
+                checked_at_unix: Some(1_700_000_000),
+            },
+            AdminPaymentNodeHealthRow {
+                node: "monero_wallet_rpc".to_owned(),
+                status: "degraded".to_owned(),
+                detail: "refresh lagging".to_owned(),
+                checked_at_unix: Some(1_700_000_000),
+            },
+            AdminPaymentNodeHealthRow {
+                node: "polkadot_rpc".to_owned(),
+                status: "down".to_owned(),
+                detail: "unreachable".to_owned(),
+                checked_at_unix: None,
+            },
+            AdminPaymentNodeHealthRow {
+                node: "solana_rpc".to_owned(),
+                status: "unknown".to_owned(),
+                detail: "never probed".to_owned(),
+                checked_at_unix: None,
+            },
+        ],
+    };
+    let v = json(&resp);
+    let nodes = v["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 5);
+    assert_eq!(nodes[3]["checked_at_unix"], serde_json::Value::Null);
+    roundtrips(&resp);
+}
+
+#[test]
+fn admin_voucher_row_records_the_rail_and_legacy_rows_parse() {
+    // A voucher minted from a settled crypto payment records which rail
+    // paid for it; the hash-only secret stays off the wire either way.
+    let row = AdminVoucherRow {
+        secret_hash_hex: "deadbeef".to_owned(),
+        duration_secs: 2_592_000,
+        payment_method: PaymentMethod::Monero,
+        created_at: 1_700_000_000,
+        redeemed_at: None,
+        is_redeemed: false,
+        redeemed_by_pubkey_ss58: None,
+        cancelled_at: None,
+        max_redemptions: Some(1),
+        valid_until: None,
+        redemptions_count: 0,
+    };
+    let v = json(&row);
+    assert_eq!(v["payment_method"], "monero");
+    assert_eq!(v["max_redemptions"], 1);
+    roundtrips(&row);
+
+    // A row from a server that pre-dates the cancel/campaign fields
+    // still parses, with single-use as the assumed redemption cap.
+    let legacy = serde_json::json!({
+        "secret_hash_hex": "deadbeef",
+        "duration_secs": 2_592_000u64,
+        "payment_method": "lightning",
+        "created_at": 1_700_000_000u64,
+        "redeemed_at": null,
+        "is_redeemed": false,
+        "redeemed_by_pubkey_ss58": null,
+    });
+    let parsed: AdminVoucherRow =
+        serde_json::from_value(legacy).expect("a pre-campaign row must deserialize");
+    assert_eq!(parsed.payment_method, PaymentMethod::Lightning);
+    assert_eq!(parsed.cancelled_at, None);
+    assert_eq!(parsed.max_redemptions, Some(1));
+    assert_eq!(parsed.redemptions_count, 0);
+}
+
+#[test]
+fn admin_withdrawal_row_omits_crypto_fields_on_the_stripe_rail() {
+    // Card rows keep the historical shape: every crypto-refund field is
+    // skip_serializing_if None, so none of them appear.
+    let stripe_row = AdminWithdrawalRow {
+        id: "wd_01".to_owned(),
+        payment_ref: "pi_3PqExample".to_owned(),
+        status: "pending".to_owned(),
+        created_at: 1_700_000_000,
+        processed_at: None,
+        ..Default::default()
+    };
+    let v = json(&stripe_row);
+    for field in [
+        "rail",
+        "refund_address",
+        "eur_amount_minor",
+        "native_amount_display",
+        "treasury_hint",
+    ] {
+        assert!(
+            v.get(field).is_none(),
+            "{field} must be omitted on a Stripe row"
+        );
+    }
+    assert_eq!(v["processed_at"], serde_json::Value::Null);
+    roundtrips(&stripe_row);
+}
+
+#[test]
+fn admin_withdrawal_row_carries_the_crypto_refund_fields() {
+    // A self-service crypto refund (doc 91 section 6.4): the rail, the
+    // consumer-supplied payout address and the native amount display.
+    // Monero's treasury lives in the external merchant wallet, so
+    // treasury_hint stays omitted; Solana's resolves cheaply on-chain.
+    let monero_row = AdminWithdrawalRow {
+        id: "wd_02".to_owned(),
+        payment_ref: "wp_7f3a9c21".to_owned(),
+        status: "pending".to_owned(),
+        created_at: 1_700_000_000,
+        processed_at: None,
+        rail: Some("monero".to_owned()),
+        refund_address: Some("44syntheticmonerorefundaddress000000000000000".to_owned()),
+        eur_amount_minor: Some(1500),
+        native_amount_display: Some("0.423000000000 XMR".to_owned()),
+        treasury_hint: None,
+    };
+    let v = json(&monero_row);
+    assert_eq!(v["rail"], "monero");
+    assert_eq!(
+        v["refund_address"],
+        "44syntheticmonerorefundaddress000000000000000"
+    );
+    assert_eq!(v["native_amount_display"], "0.423000000000 XMR");
+    assert_eq!(v["eur_amount_minor"], 1500);
+    assert!(
+        v.get("treasury_hint").is_none(),
+        "a rail with an external treasury omits the hint"
+    );
+    roundtrips(&monero_row);
+
+    let solana_row = AdminWithdrawalRow {
+        rail: Some("solana".to_owned()),
+        treasury_hint: Some("So1anaTreasury111111111111111111111111111".to_owned()),
+        ..monero_row
+    };
+    assert_eq!(
+        json(&solana_row)["treasury_hint"],
+        "So1anaTreasury111111111111111111111111111"
+    );
+}
+
+#[test]
+fn admin_withdrawal_refund_body_defaults_and_crypto_guard() {
+    // Both flags default to false so a legacy/absent body can never
+    // silently satisfy the crypto sent-confirmed guard.
+    let parsed: AdminWithdrawalRefundBody = serde_json::from_str(r#"{}"#).unwrap();
+    assert!(!parsed.override_window);
+    assert!(!parsed.sent_confirmed);
+
+    // `override` has no skip attr (always on the wire); `sent_confirmed`
+    // is skipped while false.
+    assert_eq!(
+        json(&AdminWithdrawalRefundBody::default()),
+        serde_json::json!({ "override": false })
+    );
+    let confirmed = AdminWithdrawalRefundBody {
+        override_window: false,
+        sent_confirmed: true,
+    };
+    assert_eq!(
+        json(&confirmed),
+        serde_json::json!({ "override": false, "sent_confirmed": true })
+    );
+    roundtrips(&confirmed);
+}
+
+#[test]
+fn withdrawal_request_and_ack_shape() {
+    // The no-auth website-facing body carries only the payment
+    // reference; identity stays with the PSP.
+    let req = WithdrawalRequestBody {
+        payment_ref: "pi_3PqExample".to_owned(),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "payment_ref": "pi_3PqExample" })
+    );
+    roundtrips(&req);
+
+    let ack = WithdrawalAck {
+        reference: "wda_01".to_owned(),
+    };
+    assert_eq!(json(&ack), serde_json::json!({ "reference": "wda_01" }));
+    roundtrips(&ack);
+}
+
+#[test]
+fn mobile_payment_dtos_shape_and_secret_redaction() {
+    let init_apple = InitApplePaymentResponse {
+        app_account_token: "3f5b2c1e-9a8d-4e7f-b1c2-3d4e5f6a7b8c".to_owned(),
+    };
+    assert_eq!(
+        json(&init_apple),
+        serde_json::json!({
+            "app_account_token": "3f5b2c1e-9a8d-4e7f-b1c2-3d4e5f6a7b8c"
+        })
+    );
+    roundtrips(&init_apple);
+
+    // The JWS receipt and the Play purchase token are credential-grade:
+    // their Debug impls must never print them.
+    let check_apple = CheckApplePaymentRequest {
+        jws_transaction: "eyJhbGciOiJFUzI1NiJ9.payload.signature".to_owned(),
+    };
+    assert_eq!(
+        json(&check_apple),
+        serde_json::json!({
+            "jws_transaction": "eyJhbGciOiJFUzI1NiJ9.payload.signature"
+        })
+    );
+    let dbg = format!("{check_apple:?}");
+    assert!(
+        !dbg.contains("eyJhbGci"),
+        "Debug must redact the JWS: {dbg}"
+    );
+    assert!(dbg.contains("<redacted>"));
+
+    let init_google = InitGooglePaymentResponse {
+        obfuscated_account_id: "obf_9c8b7a".to_owned(),
+    };
+    assert_eq!(
+        json(&init_google),
+        serde_json::json!({ "obfuscated_account_id": "obf_9c8b7a" })
+    );
+    roundtrips(&init_google);
+
+    let ack_google = AcknowledgeGooglePaymentRequest {
+        purchase_token: "kgdpfjep.secret-token".to_owned(),
+    };
+    let dbg = format!("{ack_google:?}");
+    assert!(
+        !dbg.contains("kgdpfjep"),
+        "Debug must redact the purchase token: {dbg}"
+    );
+    assert!(dbg.contains("<redacted>"));
+
+    let resp = MobilePaymentResponse {
+        expires_at: 1_702_678_400,
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({ "expires_at": 1_702_678_400u64 })
+    );
+    roundtrips(&resp);
+}
