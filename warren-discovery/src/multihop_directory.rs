@@ -71,6 +71,24 @@ use crate::envelope;
 /// cryptographic rather than server-trusted.
 pub const MULTIHOP_DIRECTORY_VERSION: u32 = 2;
 
+/// The frozen directory route. Its body shape can never gain a field: this
+/// envelope is verified against a re-serialization of the parsed nodes, so a
+/// field a client's build does not know is dropped at parse and the signature
+/// check then fails outright. Measured on the live fleet, where it disabled a
+/// node's relay role one second after it first appeared
+/// (`incidents/2026-09-21-a-new-directory-field-*`).
+pub const MULTIHOP_DIRECTORY_PATH_V1: &str = "/v1/multihop/directory";
+
+/// The route every new field lands on, starting with each relay's second
+/// address family (`RelayDescriptorSigned::endpoint_v6`), which is the only
+/// way a device on an IPv6-only network can dial Warren at all.
+///
+/// A client that understands it asks for this one and falls back to
+/// [`MULTIHOP_DIRECTORY_PATH_V1`] on `404`, so it keeps working against a
+/// backend that predates the route. Both bodies verify identically: same
+/// version, same pins, same envelope.
+pub const MULTIHOP_DIRECTORY_PATH_V2: &str = "/v2/multihop/directory";
+
 /// One node in the unified fleet. The same physical node is described as
 /// both a relay (entry hop) and an exit (exit hop); both descriptors are
 /// operational-signed and share the node's endpoint + Ed25519 identity.
