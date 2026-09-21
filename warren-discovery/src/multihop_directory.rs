@@ -715,6 +715,11 @@ pub struct VerifiedExit {
     /// Entry-relay QUIC endpoint to dial (v7 redacts the exit egress IP; the
     /// client always dials the entry hop).
     pub endpoint: std::net::SocketAddr,
+    /// The same dialed hop on the other address family, when it binds one:
+    /// what a client with no IPv4 route reaches it on. Projected from the
+    /// relay descriptor like [`Self::endpoint`], and re-projected from the
+    /// ENTRY by [`VerifiedExit::via_entry`], since that is the hop dialed.
+    pub endpoint_v6: Option<std::net::SocketAddr>,
     /// ISO 3166-1 alpha-2 country.
     pub country: String,
     /// Autonomous System number (`0` = unknown), the AS-diversity input for
@@ -757,6 +762,11 @@ pub struct VerifiedEntry {
     pub relay_ed25519_pubkey: [u8; 32],
     /// Entry-relay QUIC endpoint to dial.
     pub endpoint: std::net::SocketAddr,
+    /// The same hop on the other address family, when it binds one. A client
+    /// whose network hands out no IPv4 dials this instead of [`Self::endpoint`]
+    /// (`warrenguard_multihop::dial` owns the choice); a dual-stack client
+    /// keeps dialing the primary.
+    pub endpoint_v6: Option<std::net::SocketAddr>,
     /// ISO 3166-1 alpha-2 country.
     pub country: String,
     /// Autonomous System number (`0` = unknown), the AS-diversity input for
@@ -805,6 +815,10 @@ impl VerifiedExit {
         }
         Some(VerifiedExit {
             endpoint: entry.endpoint,
+            // Both addresses come from the dialed hop, for the same reason as
+            // `cover_domain` below: the spread would otherwise carry the
+            // EXIT's copy, and the client dials the entry.
+            endpoint_v6: entry.endpoint_v6,
             cover_domain: entry.cover_domain.clone(),
             // The carrier terminates at the hop the client dials, so this must be
             // the ENTRY's flag, not the exit's `..self` value the spread carries.
@@ -968,6 +982,7 @@ impl VerifiedMultiHopDirectory {
             .map(|n| VerifiedEntry {
                 relay_ed25519_pubkey: n.relay.relay_ed25519_pubkey,
                 endpoint: n.relay.endpoint,
+                endpoint_v6: n.relay.endpoint_v6,
                 country: n.country.clone(),
                 asn: n.asn,
                 city: n.city.clone(),
@@ -990,6 +1005,7 @@ impl VerifiedMultiHopDirectory {
                 exit_ed25519_pubkey: n.exit.exit_ed25519_pubkey,
                 exit_x25519_multihop_pubkey: n.exit.exit_x25519_multihop_pubkey,
                 endpoint: n.relay.endpoint,
+                endpoint_v6: n.relay.endpoint_v6,
                 country: n.country.clone(),
                 asn: n.asn,
                 city: n.city.clone(),
@@ -1738,6 +1754,46 @@ mod tests {
         let verified = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
             .expect("a dual-stack directory must verify like any other");
         assert_eq!(verified.nodes[0].relay.endpoint_v6, Some(v6));
+    }
+
+    #[test]
+    fn the_circuit_view_carries_the_dialed_hops_second_address() {
+        // `via_entry` projects the hop the client DIALS. The exit's own copy of
+        // an address family would be the wrong one, exactly like `cover_domain`
+        // and `tcp_fallback`, and on an IPv6-only client it would be the
+        // difference between a circuit and a wall.
+        let (root, op, server) = (key(0x01), key(0x02), key(0x03));
+        let mut entry_node = signed_node(&op, 1, "fr", 1);
+        let entry_v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        entry_node.relay.endpoint_v6 = Some(entry_v6);
+        let mut exit_node = signed_node(&op, 2, "de", 2);
+        exit_node.relay.endpoint_v6 = Some("[2001:db8::2]:443".parse().unwrap());
+        let signed = build(&root, &op, &server, vec![entry_node, exit_node]);
+        let json = serde_json::to_string(&signed).unwrap();
+        let verified = verify_multihop_directory_any(&json, &[&hexk(&server)], &[&hexk(&root)])
+            .expect("verify");
+
+        let entries = verified.entries();
+        let entry = entries
+            .iter()
+            .find(|e| e.country == "fr")
+            .expect("entry present");
+        assert_eq!(entry.endpoint_v6, Some(entry_v6));
+
+        let exits = verified.exits();
+        let exit = exits
+            .iter()
+            .find(|e| e.country == "de")
+            .expect("exit present");
+        let circuit = exit
+            .via_entry(entry, &CircuitPolicy::for_directory(&verified))
+            .expect("fr entry and de exit form a legal circuit");
+        assert_eq!(
+            circuit.endpoint_v6,
+            Some(entry_v6),
+            "the circuit must carry the ENTRY's v6 address, the hop the client dials"
+        );
+        assert_eq!(circuit.endpoint, entry.endpoint);
     }
 
     #[test]
