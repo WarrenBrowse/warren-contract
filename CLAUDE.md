@@ -77,5 +77,9 @@ is a simultaneous change to every client and to the backend.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
+
+The `seal` feature (minting and opening attribution tags) is enabled by
+warren-api alone; without `--all-features` its vector replay does not run.

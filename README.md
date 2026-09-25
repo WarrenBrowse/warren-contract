@@ -16,6 +16,10 @@ cannot drift between them. Warren is a privacy-focused VPN service:
   no-log helper they use in error messages.
 - `release`: the offline-signed exit-release manifest (the fleet update
   authority; doc 54).
+- `pf_attribution`: the port-forward attribution tag and the entitlement
+  envelope carried in the NAT-PMP credential trailer (doc 105). Parsing and
+  signature verification are always built; sealing and opening a tag sit
+  behind the `seal` feature, which only the backend enables.
 
 The `warren-discovery` workspace member (crate `warren-discovery-core`)
 carries the signed relay-list / roster / multi-hop directory formats and the
@@ -43,7 +47,7 @@ needed to build and test this crate is public.
 ## Build and test
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-features
 ```
 
 The `[patch]` at the foot of `Cargo.toml` redirects the pinned `warrenguard`

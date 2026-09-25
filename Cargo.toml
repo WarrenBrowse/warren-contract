@@ -20,6 +20,8 @@ members = ["warren-discovery"]
 # of this file. Keep the rev in lockstep with `.warrenguard-version`.
 warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "c8f1627793592ba0b6f9a610c9cb4235134add19" }
 warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "c8f1627793592ba0b6f9a610c9cb4235134add19" }
+# Dev-only: anchors the entitlement envelope's token length on the engine's.
+warrenguard-token = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "c8f1627793592ba0b6f9a610c9cb4235134add19" }
 
 # Lints applied to every crate in the workspace via `[lints] workspace = true`.
 # Mirrors warren-sdk-rs / warren-core policy: zero unsafe, deny correctness,
@@ -59,8 +61,24 @@ sha2 = "0.10"
 hex = "0.4"
 # Canonical signature preimage of the signed release manifest.
 serde_json = "1"
+# Wire form of the port-forward attribution tag in the /v1 DTOs (base64url,
+# no padding, like the blind signatures it travels beside).
+base64 = "0.22"
+# Wipes the entitlement a parsed envelope holds (a bearer credential).
+# Already in every consumer's graph through ed25519-dalek's `zeroize`.
+zeroize = "1"
+# Sealing and opening an attribution tag, behind `seal` (see below).
+chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+
+[features]
+# Minting and opening port-forward attribution tags. Only warren-api holds
+# the keys that need it, so the SDK, the exit and every other consumer build
+# without the AEAD: they parse and verify a tag, they never seal or open one.
+seal = ["dep:chacha20poly1305", "dep:rand_core"]
 
 [dev-dependencies]
+warrenguard-token = { workspace = true }
 
 # Local-dev / CI override: resolve the WarrenGuard engine crates from the
 # sibling checkout (`../warrenguard`) instead of fetching the pinned git rev in
@@ -72,3 +90,4 @@ serde_json = "1"
 [patch."https://github.com/WarrenBrowse/warrenguard.git"]
 warrenguard-wire = { path = "../warrenguard/crates/warrenguard-wire" }
 warrenguard-multihop = { path = "../warrenguard/crates/warrenguard-multihop" }
+warrenguard-token = { path = "../warrenguard/crates/warrenguard-token" }

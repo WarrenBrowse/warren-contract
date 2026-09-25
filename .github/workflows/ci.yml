@@ -107,9 +107,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `seal` (attribution tag sealing, warren-api only) is off for every
+      # other consumer, so lint and test both shapes: the sealing replay of
+      # vectors/pf_attribution.json only runs with it on.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test --workspace --all-features
       # The workspace denies rustdoc::broken_intra_doc_links; only a doc build
       # exercises that lint, so run one with warnings promoted.
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"

@@ -24,6 +24,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 pub use warrenguard_wire::ExitId;
 
+use crate::pf_attribution::AttributionTag;
 use crate::release::SignedReleaseManifest;
 
 // ---------------------------------------------------------------------------
@@ -1885,18 +1886,14 @@ impl fmt::Debug for AdminCreateVoucherResponse {
 // ---------------------------------------------------------------------------
 
 /// Admin row of one port-forward allocation.
+///
+/// Carries no account: an exit never resolves a forwarded port to one
+/// (nftables DNAT keys on the tunnel inner IPv4 alone), so the only
+/// port-to-account link is the attribution tag an abuse revocation
+/// returns (warren-core doc 105). A legacy row still carrying a
+/// `client_pubkey_ss58` parses, the field ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminPortForwardRow {
-    /// Owning client pubkey. Always `None` from a current exit, which
-    /// deliberately never resolves a forwarded port to an account:
-    /// nftables DNAT keys on the tunnel inner IPv4 alone, so binding the
-    /// port to a wallet would build the exact `pubkey <-> exit <-> port`
-    /// correlation the anonymous-session design exists to remove. The
-    /// field stays on the wire for the snapshots that pre-date that
-    /// design; a UI rendering `None` must read it as policy, never as a
-    /// lookup that failed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_pubkey_ss58: Option<PubkeySs58>,
     /// Hosting exit signing identity, as a Warren SS58 address (`wb…`).
     pub exit_pubkey_ss58: PubkeySs58,
     /// Allocated port.
@@ -1975,7 +1972,9 @@ pub enum PortForwardProto {
     Udp,
 }
 
-/// One active NAT-PMP allocation as observed by the exit.
+/// One active NAT-PMP allocation as observed by the exit. Carries no
+/// account (see [`AdminPortForwardRow`]); a push from an exit that still
+/// sends `client_pubkey_ss58` parses, the field ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitPortForwardAllocation {
     /// Internal tunnel IP of the owning client (10.66.x.y).
@@ -1991,13 +1990,6 @@ pub struct ExitPortForwardAllocation {
     /// clock at capture time so the API can decide staleness without
     /// trusting the exit's monotonic clock.
     pub expires_at_unix_secs: u64,
-    /// SS58 address of the client owning the mapping, resolved via the
-    /// tunnel peer map. May be `None` if the exit could not resolve
-    /// it at capture time (transient race during connection
-    /// teardown); the API renders such rows as "unknown" in the
-    /// admin view.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_pubkey_ss58: Option<PubkeySs58>,
 }
 
 /// Monotonic event counters from the exit's NAT-PMP allocator,
@@ -2072,6 +2064,11 @@ pub struct ExitPortForwardSyncRequest {
     /// for that exit until it upgrades).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<ExitPortForwardMetrics>,
+    /// Outcomes of the abuse revocations received since the previous
+    /// push. Absent when there is nothing to acknowledge, so an idle
+    /// exit pushes the bytes it always pushed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abuse_acks: Vec<PortForwardAbuseAck>,
 }
 
 /// Response body of `POST /v1/exits/port-forward/sync`. Carries the
@@ -2090,6 +2087,58 @@ pub struct ExitPortForwardSyncResponse {
     /// exit side returns `None`.
     #[serde(default)]
     pub pending_revoke_ports: Vec<u16>,
+    /// Ports reported for abuse. Unlike an admin revoke, each one arms a
+    /// 48 h quarantine the tenant reclaim path cannot bypass, and is
+    /// acknowledged in [`ExitPortForwardSyncRequest::abuse_acks`] at the
+    /// next push. Absent from a server with nothing queued.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_abuse_revokes: Vec<PortForwardAbuseRevoke>,
+}
+
+/// One abuse revocation queued for an exit (warren-core doc 105 section 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForwardAbuseRevoke {
+    /// Opaque abuse case identifier, echoed in the acknowledgement.
+    pub case_id: String,
+    /// External port to revoke, on both transports.
+    pub port: u16,
+}
+
+/// What the exit found when it applied a [`PortForwardAbuseRevoke`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AbuseRevokeOutcome {
+    /// A mapping held the port and was removed.
+    Revoked,
+    /// Nothing held the port. The case closes with no strike.
+    NotAllocated,
+    /// An outcome this build does not know, from a newer exit. Read as
+    /// actioned and unattributed, so it never costs the rest of the push.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The exit's acknowledgement of one abuse revocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForwardAbuseAck {
+    /// The case this acknowledges.
+    pub case_id: String,
+    /// What the exit found.
+    pub outcome: AbuseRevokeOutcome,
+    /// When the revoked tenant first obtained the port, Unix seconds
+    /// (renewals keep it). Later than the incident time the complaint
+    /// names means the port changed hands since: the case closes as
+    /// `holder_changed` with no strike. Absent on
+    /// [`AbuseRevokeOutcome::NotAllocated`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder_since_unix_secs: Option<u64>,
+    /// The attribution tag the revoked mapping was bought with. The only
+    /// path on which a tag ever leaves an exit. Absent on
+    /// [`AbuseRevokeOutcome::NotAllocated`], and on a mapping granted
+    /// without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<AttributionTag>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3682,6 +3731,12 @@ pub struct TokenEpochResponse {
     /// (`out_of_window` | `not_subscribed` | `already_issued` | `bad_batch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
+    /// Port-entitlement class only: one attribution tag per blind
+    /// signature, in the same order, which the client pairs with the
+    /// token it unblinds from that signature. Empty, and absent from the
+    /// wire, for session tokens.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attribution_tags: Vec<AttributionTag>,
 }
 
 /// `GET /v1/tokens/keys` response: the issuer public keys for the currently
@@ -3706,6 +3761,125 @@ pub struct TokenIssuerDirectory {
     pub prefetch_epochs: u64,
     /// One key per epoch in the published window.
     pub keys: Vec<TokenIssuerKey>,
+    /// Port-entitlement directory only: the Ed25519 key attribution tags
+    /// are verified against (decode with
+    /// [`crate::pf_attribution::verifying_key`]). Absent for session
+    /// tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution_verifying_key_hex: Option<PubkeyHex>,
+}
+
+// ---- Port-forward abuse accountability (warren-core doc 105) ----
+
+/// Abuse category of a port-forward report. Stable snake_case wire names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AbuseCategory {
+    /// Copyright infringement notice.
+    Copyright,
+    /// Malware distribution or command-and-control.
+    MalwareC2,
+    /// Spam.
+    Spam,
+    /// Scanning or intrusion attempts.
+    Scanning,
+    /// Phishing.
+    Phishing,
+    /// Child sexual abuse material.
+    Csam,
+    /// Anything else. A category this build does not know reads as this
+    /// one, so a new category never breaks a deployed client.
+    #[serde(other)]
+    Other,
+}
+
+/// CRL reason token of a ban for port-forwarding abuse.
+pub const CRL_REASON_PORT_FORWARDING_ABUSE: &str = "port-forwarding-abuse";
+
+/// Why a wallet is banned, as the client is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BanReasonCode {
+    /// Three port-forward abuse strikes inside the sliding window.
+    PortForwardingAbuse,
+    /// Any other revocation, and any reason this build does not know.
+    #[serde(other)]
+    Other,
+}
+
+impl BanReasonCode {
+    /// The code a CRL entry's free-form reason token maps to.
+    #[must_use]
+    pub fn from_crl_reason(reason: &str) -> Self {
+        if reason == CRL_REASON_PORT_FORWARDING_ABUSE {
+            Self::PortForwardingAbuse
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// Body of a refused `POST /v1/tokens/issue` or
+/// `POST /v1/port-entitlements/issue` (HTTP 403), so the app can show the
+/// suspension without dialing an exit. Internally tagged on `error`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IssuanceRefusal {
+    /// The wallet is on the CRL.
+    Banned {
+        /// Why.
+        reason_code: BanReasonCode,
+        /// When the ban lapses on its own. Absent for a ban that does not
+        /// lapse.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lapses_at_unix_secs: Option<u64>,
+    },
+}
+
+/// Response of the wallet-signed `GET /v1/account/standing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStandingResponse {
+    /// Strikes still inside the window, oldest first.
+    pub strikes: Vec<AccountStrike>,
+    /// Live strikes that trigger a ban (3).
+    pub threshold: u32,
+    /// Length of the sliding strike window, in days (90).
+    pub window_days: u32,
+    /// The ban in force. Absent in good standing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ban: Option<AccountBan>,
+}
+
+/// One live strike in an [`AccountStandingResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStrike {
+    /// Day of the strike, as midnight UTC Unix seconds (DATE precision).
+    pub day_unix_secs: u64,
+    /// Category of the report behind it.
+    pub category: AbuseCategory,
+    /// Country of the exit that held the port, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_country: Option<CountryCode>,
+    /// The forwarded port that was closed.
+    pub port: u16,
+    /// Case reference to quote when contesting the strike.
+    pub case_reference: String,
+}
+
+/// A ban in an [`AccountStandingResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBan {
+    /// When the ban took effect, Unix seconds.
+    pub banned_at_unix_secs: u64,
+    /// When it lapses on its own, Unix seconds. Absent for a ban that
+    /// does not lapse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lapses_at_unix_secs: Option<u64>,
+    /// Why.
+    pub reason_code: BanReasonCode,
 }
 
 /// One epoch's public key in a [`TokenIssuerDirectory`].
@@ -4329,9 +4503,6 @@ mod tests {
                 redemptions_count: 0,
             }],
             port_forwards: vec![AdminPortForwardRow {
-                client_pubkey_ss58: Some(
-                    PubkeySs58::try_from(crate::ss58::encode(&[0x22; 32])).expect("valid SS58"),
-                ),
                 exit_pubkey_ss58: PubkeySs58::try_from(crate::ss58::encode(&[0xee; 32]))
                     .expect("valid SS58"),
                 port: 49200,
@@ -4354,8 +4525,6 @@ mod tests {
 
     #[test]
     fn exit_port_forward_sync_request_round_trips() {
-        let pubkey =
-            PubkeySs58::try_from(crate::ss58::encode(&[0xaa; 32])).expect("valid SS58 address");
         let req = ExitPortForwardSyncRequest {
             instance_id: 0xDEAD_BEEF_CAFE_F00D,
             generation: 7,
@@ -4366,9 +4535,9 @@ mod tests {
                 internal_port: 49200,
                 proto: PortForwardProto::Tcp,
                 expires_at_unix_secs: 1_700_003_600,
-                client_pubkey_ss58: Some(pubkey),
             }],
             metrics: None,
+            abuse_acks: Vec::new(),
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let parsed: ExitPortForwardSyncRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4446,21 +4615,6 @@ mod tests {
             serde_json::from_str(raw).expect("deserialize without instance_id");
         assert_eq!(parsed.instance_id, 0);
         assert_eq!(parsed.generation, 42);
-    }
-
-    #[test]
-    fn exit_port_forward_allocation_tolerates_missing_client_pubkey() {
-        // The exit resolves the client pubkey via its tunnel session
-        // map, which can briefly lag a fresh allocation. The wire
-        // format MUST tolerate a missing field so the push is not
-        // dropped during that lag.
-        let raw = r#"{"internal_ip":"10.66.0.42","external_port":49200,"internal_port":49200,"proto":"tcp","expires_at_unix_secs":1700003600}"#;
-        let parsed: ExitPortForwardAllocation =
-            serde_json::from_str(raw).expect("deserialize without client_pubkey_ss58");
-        assert!(
-            parsed.client_pubkey_ss58.is_none(),
-            "absent client_pubkey_ss58 must default to None"
-        );
     }
 
     #[test]
@@ -5903,5 +6057,272 @@ mod tests {
         assert_eq!(json["pool_size"], 12);
         assert_eq!(json["assigned"], 11);
         assert_eq!(json["cohort_size"], 11);
+    }
+}
+
+#[cfg(test)]
+mod pf_accountability_tests {
+    use super::*;
+    use crate::pf_attribution::{AttributionTag, TAG_LEN, TAG_VERSION};
+
+    fn tag(fill: u8) -> AttributionTag {
+        let mut raw = [fill; TAG_LEN];
+        raw[0] = TAG_VERSION;
+        AttributionTag::from_bytes(&raw).expect("well-formed tag")
+    }
+
+    #[test]
+    fn session_token_epoch_response_stays_byte_identical_without_tags() {
+        let epoch = TokenEpochResponse {
+            epoch: 7,
+            issued: true,
+            blind_signatures: vec!["c2ln".to_owned()],
+            token_key_id: Some("ab".repeat(32)),
+            reject_reason: None,
+            attribution_tags: Vec::new(),
+        };
+        let json = serde_json::to_string(&epoch).expect("serialize");
+        assert!(
+            !json.contains("attribution_tags"),
+            "a session-token batch carries no tag, and its bytes must not change: {json}"
+        );
+        let legacy = r#"{"epoch":7,"issued":true,"blind_signatures":["c2ln"]}"#;
+        let parsed: TokenEpochResponse = serde_json::from_str(legacy).expect("pre-tag response");
+        assert!(parsed.attribution_tags.is_empty());
+    }
+
+    #[test]
+    fn port_entitlement_epoch_response_carries_one_tag_per_blind_signature_in_order() {
+        let epoch = TokenEpochResponse {
+            epoch: 7,
+            issued: true,
+            blind_signatures: vec!["YQ".to_owned(), "Yg".to_owned()],
+            token_key_id: Some("ab".repeat(32)),
+            reject_reason: None,
+            attribution_tags: vec![tag(0x01), tag(0x02)],
+        };
+        let value = serde_json::to_value(&epoch).expect("serialize");
+        let tags = value["attribution_tags"].as_array().expect("array");
+        assert_eq!(tags.len(), 2);
+        assert!(
+            tags.iter()
+                .all(|t| t.as_str().is_some_and(|s| !s.contains('='))),
+            "base64url without padding, like the blind signatures: {tags:?}"
+        );
+        let back: TokenEpochResponse = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(
+            back.attribution_tags,
+            vec![tag(0x01), tag(0x02)],
+            "the SDK pairs tag i with signature i, so order is load-bearing"
+        );
+    }
+
+    #[test]
+    fn issuer_directory_attribution_key_is_absent_for_session_tokens_and_hex_when_published() {
+        let dir = TokenIssuerDirectory {
+            issuer_name: "warren".to_owned(),
+            token_type: 2,
+            epoch_secs: 3600,
+            context_label: "l".to_owned(),
+            quota_per_epoch: 5,
+            prefetch_epochs: 1,
+            keys: Vec::new(),
+            attribution_verifying_key_hex: None,
+        };
+        let json = serde_json::to_string(&dir).expect("serialize");
+        assert!(!json.contains("attribution"), "{json}");
+        let parsed: TokenIssuerDirectory = serde_json::from_str(&json).expect("pre-key directory");
+        assert!(parsed.attribution_verifying_key_hex.is_none());
+
+        let key = PubkeyHex::try_from("cd".repeat(32).as_str()).expect("hex");
+        let published = TokenIssuerDirectory {
+            attribution_verifying_key_hex: Some(key.clone()),
+            ..dir
+        };
+        let value = serde_json::to_value(&published).expect("serialize");
+        assert_eq!(value["attribution_verifying_key_hex"], "cd".repeat(32));
+        let back: TokenIssuerDirectory = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.attribution_verifying_key_hex, Some(key));
+    }
+
+    #[test]
+    fn abuse_category_wire_names_are_stable_snake_case() {
+        for (category, wire) in [
+            (AbuseCategory::Copyright, "copyright"),
+            (AbuseCategory::MalwareC2, "malware_c2"),
+            (AbuseCategory::Spam, "spam"),
+            (AbuseCategory::Scanning, "scanning"),
+            (AbuseCategory::Phishing, "phishing"),
+            (AbuseCategory::Csam, "csam"),
+            (AbuseCategory::Other, "other"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(category).expect("serialize"),
+                wire,
+                "{category:?}"
+            );
+            assert_eq!(
+                serde_json::from_value::<AbuseCategory>(wire.into()).expect("deserialize"),
+                category
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<AbuseCategory>("botnet".into()).expect("deserialize"),
+            AbuseCategory::Other,
+            "a category a deployed app does not know must not fail its whole standing view"
+        );
+    }
+
+    #[test]
+    fn account_standing_response_wire_shape() {
+        let standing = AccountStandingResponse {
+            strikes: vec![AccountStrike {
+                day_unix_secs: 1_758_758_400,
+                category: AbuseCategory::Copyright,
+                exit_country: Some(CountryCode::try_from("NL").expect("country")),
+                port: 51_234,
+                case_reference: "case-0001".to_owned(),
+            }],
+            threshold: 3,
+            window_days: 90,
+            ban: Some(AccountBan {
+                banned_at_unix_secs: 1_758_800_000,
+                lapses_at_unix_secs: Some(1_790_336_000),
+                reason_code: BanReasonCode::PortForwardingAbuse,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_string(&standing).expect("serialize"),
+            r#"{"strikes":[{"day_unix_secs":1758758400,"category":"copyright","exit_country":"NL","port":51234,"case_reference":"case-0001"}],"threshold":3,"window_days":90,"ban":{"banned_at_unix_secs":1758800000,"lapses_at_unix_secs":1790336000,"reason_code":"port_forwarding_abuse"}}"#
+        );
+        let clean = r#"{"strikes":[],"threshold":3,"window_days":90}"#;
+        let parsed: AccountStandingResponse = serde_json::from_str(clean).expect("good standing");
+        assert!(parsed.ban.is_none() && parsed.strikes.is_empty());
+        assert_eq!(serde_json::to_string(&parsed).expect("serialize"), clean);
+    }
+
+    #[test]
+    fn banned_issuance_refusal_wire_shape() {
+        let refusal = IssuanceRefusal::Banned {
+            reason_code: BanReasonCode::PortForwardingAbuse,
+            lapses_at_unix_secs: Some(1_790_336_000),
+        };
+        assert_eq!(
+            serde_json::to_string(&refusal).expect("serialize"),
+            r#"{"error":"banned","reason_code":"port_forwarding_abuse","lapses_at_unix_secs":1790336000}"#
+        );
+        let permanent = r#"{"error":"banned","reason_code":"chargeback"}"#;
+        assert_eq!(
+            serde_json::from_str::<IssuanceRefusal>(permanent).expect("deserialize"),
+            IssuanceRefusal::Banned {
+                reason_code: BanReasonCode::Other,
+                lapses_at_unix_secs: None,
+            },
+            "a reason code this build does not know still reads as a ban"
+        );
+    }
+
+    #[test]
+    fn ban_reason_code_maps_the_crl_reason_token() {
+        assert_eq!(
+            BanReasonCode::from_crl_reason(CRL_REASON_PORT_FORWARDING_ABUSE),
+            BanReasonCode::PortForwardingAbuse
+        );
+        assert_eq!(CRL_REASON_PORT_FORWARDING_ABUSE, "port-forwarding-abuse");
+        assert_eq!(
+            BanReasonCode::from_crl_reason("chargeback"),
+            BanReasonCode::Other
+        );
+    }
+
+    #[test]
+    fn sync_response_carries_abuse_revokes_and_stays_identical_without_them() {
+        let steady = ExitPortForwardSyncResponse::default();
+        let json = serde_json::to_string(&steady).expect("serialize");
+        assert_eq!(json, r#"{"pending_revoke_ports":[]}"#);
+        let legacy: ExitPortForwardSyncResponse =
+            serde_json::from_str(r#"{"pending_revoke_ports":[50000]}"#).expect("pre-abuse server");
+        assert!(legacy.pending_abuse_revokes.is_empty());
+
+        let with_case = ExitPortForwardSyncResponse {
+            pending_revoke_ports: Vec::new(),
+            pending_abuse_revokes: vec![PortForwardAbuseRevoke {
+                case_id: "case-0001".to_owned(),
+                port: 51_234,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&with_case).expect("serialize"),
+            r#"{"pending_revoke_ports":[],"pending_abuse_revokes":[{"case_id":"case-0001","port":51234}]}"#
+        );
+    }
+
+    #[test]
+    fn sync_request_carries_abuse_acks_with_an_optional_tag() {
+        let revoked = PortForwardAbuseAck {
+            case_id: "case-0001".to_owned(),
+            outcome: AbuseRevokeOutcome::Revoked,
+            holder_since_unix_secs: Some(1_758_700_000),
+            tag: Some(tag(0x03)),
+        };
+        let idle = PortForwardAbuseAck {
+            case_id: "case-0002".to_owned(),
+            outcome: AbuseRevokeOutcome::NotAllocated,
+            holder_since_unix_secs: None,
+            tag: None,
+        };
+        let value = serde_json::to_value([&revoked, &idle]).expect("serialize");
+        assert_eq!(value[0]["outcome"], "revoked");
+        assert_eq!(
+            value[0]["holder_since_unix_secs"], 1_758_700_000,
+            "the API compares it with the incident time before striking anyone"
+        );
+        assert_eq!(value[1]["outcome"], "not_allocated");
+        assert!(
+            value[1].get("tag").is_none() && value[1].get("holder_since_unix_secs").is_none(),
+            "no port held, no holder and no tag: {value}"
+        );
+        let back: Vec<PortForwardAbuseAck> = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back, vec![revoked, idle]);
+
+        let newer = r#"{"case_id":"case-0003","outcome":"quarantined_elsewhere"}"#;
+        assert_eq!(
+            serde_json::from_str::<PortForwardAbuseAck>(newer)
+                .expect("an outcome from a newer exit must not drop the whole push")
+                .outcome,
+            AbuseRevokeOutcome::Unknown
+        );
+
+        let legacy = r#"{"generation":1,"captured_at_unix_secs":1700000000,"allocations":[]}"#;
+        let parsed: ExitPortForwardSyncRequest =
+            serde_json::from_str(legacy).expect("pre-ack exit");
+        assert!(parsed.abuse_acks.is_empty());
+        assert!(
+            !serde_json::to_string(&parsed)
+                .expect("serialize")
+                .contains("abuse_acks"),
+            "an exit with nothing to acknowledge pushes the pre-ack bytes"
+        );
+    }
+
+    #[test]
+    fn mirror_rows_carry_no_account_and_still_parse_a_legacy_exit_push() {
+        let account = crate::ss58::encode(&[0xd2; 32]);
+        let legacy_alloc = r#"{"internal_ip":"10.66.0.42","external_port":49200,"internal_port":49200,"proto":"tcp","expires_at_unix_secs":1700003600,"client_pubkey_ss58":"ACCOUNT"}"#
+            .replace("ACCOUNT", &account);
+        let alloc: ExitPortForwardAllocation =
+            serde_json::from_str(&legacy_alloc).expect("an exit still on the old build");
+        let json = serde_json::to_string(&alloc).expect("serialize");
+        assert!(!json.contains("pubkey"), "{json}");
+
+        let legacy_row = r#"{"exit_pubkey_ss58":"EXIT","port":49200,"expires_at":1700003600,"client_pubkey_ss58":"ACCOUNT"}"#
+            .replace("EXIT", &crate::ss58::encode(&[0xee; 32]))
+            .replace("ACCOUNT", &account);
+        let row: AdminPortForwardRow = serde_json::from_str(&legacy_row).expect("legacy row");
+        let json = serde_json::to_string(&row).expect("serialize");
+        assert!(
+            !json.contains("client_pubkey"),
+            "the mirror never binds a port to an account: {json}"
+        );
     }
 }

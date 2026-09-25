@@ -16,6 +16,8 @@
 //!   when its controller goes away), shared by every client.
 //! - [`fallback`]: the canonical anti-censorship HTTP fallback attempt
 //!   sequence.
+//! - [`pf_attribution`]: the port-forward attribution tag and the
+//!   entitlement envelope carried in the NAT-PMP credential trailer.
 //!
 //! The `warren-discovery` workspace member (crate `warren-discovery-core`)
 //! carries the signed relay list / roster / multi-hop directory formats and
@@ -26,6 +28,7 @@ pub mod dto;
 pub mod env;
 pub mod fallback;
 pub mod killswitch;
+pub mod pf_attribution;
 pub mod phase;
 pub mod product;
 pub mod release;
