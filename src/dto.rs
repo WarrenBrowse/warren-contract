@@ -606,6 +606,9 @@ pub struct FleetLiveStats {
     pub capacity_bps: u64,
     /// Capacity-weighted mean of the online exits' load, `0..=100`.
     pub load_percent: u8,
+    /// The band `load_percent` falls in, on the same scale as an exit's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_level: Option<LoadLevel>,
     /// Bytes carried for users over the 24 clock hours ending on the last
     /// one, both directions.
     pub transferred_24h_bytes: u64,

@@ -30,6 +30,7 @@ fn sample() -> NetworkStatsResponse {
             upload_bps: 50_000_000,
             capacity_bps: 2_000_000_000,
             load_percent: 23,
+            load_level: Some(LoadLevel::Low),
             transferred_24h_bytes: 9_000_000_000_000,
             peak_connected_24h: 80,
             peak_throughput_24h_bps: 900_000_000,
