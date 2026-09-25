@@ -521,6 +521,188 @@ pub struct NetworkInfoResponse {
     pub payments_enabled: bool,
 }
 
+/// `GET /v1/network/stats` response. Public, unauthenticated, unsigned
+/// transparency snapshot of the network this API serves: how many people
+/// use it, how many are connected, and how busy each exit is.
+///
+/// # Privacy shape
+///
+/// Every figure is computed over one closed, aligned window of
+/// `window_secs` ending at `generated_at`, and the snapshot only changes
+/// when the next window closes. A sliding window would let a client that
+/// polls continuously recover each heartbeat by differencing two
+/// consecutive snapshots; tumbling windows leave nothing finer to recover.
+/// Per-exit user counts are additionally floored to a multiple of
+/// `exit_users_rounding`, so one person joining a small exit does not move
+/// its public count. Fleet-wide totals are exact: they say nothing about
+/// which exit anyone uses.
+///
+/// Only node-level aggregates appear here, never anything per client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkStatsResponse {
+    /// Schema version of this document, `1` today. Additive fields do not
+    /// bump it; a rename or a retype does.
+    pub version: u32,
+    /// Environment name, as in [`NetworkInfoResponse::environment`].
+    pub environment: String,
+    /// Unix seconds at which the window this snapshot describes closed.
+    pub generated_at: u64,
+    /// Length of the aggregation window in seconds. Also the useful poll
+    /// period: polling faster returns the same snapshot.
+    pub window_secs: u32,
+    /// Granularity of [`ExitLiveStats::connected`]: per-exit counts are
+    /// floored to a multiple of this value. `1` means exact counts.
+    pub exit_users_rounding: u32,
+    /// Fleet-wide user totals.
+    pub users: NetworkUserStats,
+    /// Fleet-wide traffic and capacity.
+    pub fleet: FleetLiveStats,
+    /// One entry per exit known to the network, offline ones included so
+    /// an outage is visible rather than silent.
+    pub exits: Vec<ExitLiveStats>,
+    /// Fleet-wide history over the last 24 hours, oldest first.
+    pub history: Vec<FleetHistoryPoint>,
+}
+
+/// Fleet-wide user totals of a [`NetworkStatsResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkUserStats {
+    /// Wallets registered on this network, whether their time has run out
+    /// or not. A deleted account is no longer counted.
+    pub accounts_total: u64,
+    /// Wallets with time left at `generated_at`.
+    pub subscribers_active: u64,
+    /// People connected to an exit during the window (mean over the
+    /// window, summed over the fleet, exact).
+    pub connected: u32,
+}
+
+/// Fleet-wide traffic and capacity of a [`NetworkStatsResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetLiveStats {
+    /// Exits that sent a heartbeat recently and are not drained.
+    pub exits_online: u32,
+    /// Exits listed in [`NetworkStatsResponse::exits`].
+    pub exits_total: u32,
+    /// Traffic delivered to users over the window, bits per second.
+    pub download_bps: u64,
+    /// Traffic sent by users over the window, bits per second.
+    pub upload_bps: u64,
+    /// Sum of the link capacity of the online exits, bits per second.
+    pub capacity_bps: u64,
+    /// Capacity-weighted mean of the online exits' load, `0..=100`.
+    pub load_percent: u8,
+    /// Bytes carried for users over the last 24 hours, both directions.
+    pub transferred_24h_bytes: u64,
+    /// Highest one-window `connected` over the last 24 hours.
+    pub peak_connected_24h: u32,
+    /// Highest one-window throughput (both directions) over the last 24
+    /// hours, bits per second.
+    pub peak_throughput_24h_bps: u64,
+}
+
+/// One exit in a [`NetworkStatsResponse`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitLiveStats {
+    /// The exit's stable identifier, the same one the signed relay list
+    /// carries, so a client can join the two.
+    pub exit_id: ExitId,
+    /// Composed fleet name (`fr-par-h1b`), when the node has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// ISO 3166-1 alpha-2 country code.
+    pub country: String,
+    /// City name.
+    pub city: String,
+    /// `true` when the exit heartbeats and is not drained.
+    pub online: bool,
+    /// People connected during the window, floored to a multiple of
+    /// [`NetworkStatsResponse::exit_users_rounding`].
+    pub connected: u32,
+    /// Traffic this exit delivered to users over the window, bits/s.
+    pub download_bps: u64,
+    /// Traffic users sent through this exit over the window, bits/s.
+    pub upload_bps: u64,
+    /// Link capacity of the node, bits/s, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bps: Option<u64>,
+    /// How close the node is to saturation, `0..=100`. `None` when the
+    /// exit reported nothing to derive it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_percent: Option<u8>,
+    /// The band `load_percent` falls in, decided server-side so every
+    /// client colours the same exit the same way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_level: Option<LoadLevel>,
+    /// The resource that set `load_percent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_driver: Option<LoadDriver>,
+    /// Mean whole-box CPU use over the window, `0..=100`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<u8>,
+    /// Seconds since the exit process started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
+    /// This exit's recent windows, oldest first.
+    pub history: Vec<ExitHistoryPoint>,
+}
+
+/// One closed window of an exit's history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitHistoryPoint {
+    /// Unix seconds at which the window closed.
+    pub t: u64,
+    /// Same rounding as [`ExitLiveStats::connected`].
+    pub connected: u32,
+    /// Both directions, bits per second.
+    pub throughput_bps: u64,
+    /// Load of the window, when it could be derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_percent: Option<u8>,
+}
+
+/// One bucket of the fleet's 24-hour history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetHistoryPoint {
+    /// Unix seconds at which the bucket closed.
+    pub t: u64,
+    /// Mean people connected over the bucket, fleet-wide.
+    pub connected: u32,
+    /// Mean throughput over the bucket, both directions, bits per second.
+    pub throughput_bps: u64,
+}
+
+/// Load band of an exit. The thresholds are server policy; clients only
+/// map a band to a colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadLevel {
+    /// Plenty of room.
+    Low,
+    /// Busy, still comfortable.
+    Moderate,
+    /// Close to its limit: expect lower speeds at peak.
+    High,
+    /// At its limit.
+    Saturated,
+    /// A band this client does not know yet.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The resource that sets an exit's load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadDriver {
+    /// Link throughput against the link capacity.
+    Bandwidth,
+    /// Processor time.
+    Cpu,
+    /// A driver this client does not know yet.
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Subscription endpoints.
 // ---------------------------------------------------------------------------
