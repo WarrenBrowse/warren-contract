@@ -4,6 +4,7 @@
   "generated_at": 1790000000,
   "window_secs": 60,
   "exit_users_rounding": 5,
+  "exit_live_threshold": 20,
   "users": {
     "accounts_total": 1234,
     "subscribers_active": 987,
@@ -27,6 +28,7 @@
       "country": "FR",
       "city": "Paris",
       "online": true,
+      "live": true,
       "connected": 40,
       "download_bps": 300000000,
       "upload_bps": 30000000,
@@ -35,7 +37,7 @@
       "load_level": "low",
       "load_driver": "bandwidth",
       "cpu_percent": 21,
-      "uptime_secs": 86400,
+      "uptime_secs": 172800,
       "history": [
         { "t": 1789999940, "connected": 40, "throughput_bps": 310000000, "load_percent": 35 }
       ]
@@ -44,10 +46,12 @@
       "exit_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
       "country": "RO",
       "city": "Bucharest",
-      "online": false,
+      "online": true,
+      "live": false,
       "connected": 0,
       "download_bps": 0,
       "upload_bps": 0,
+      "load_level": "moderate",
       "history": []
     }
   ],

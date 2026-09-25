@@ -532,10 +532,16 @@ pub struct NetworkInfoResponse {
 /// when the next window closes. A sliding window would let a client that
 /// polls continuously recover each heartbeat by differencing two
 /// consecutive snapshots; tumbling windows leave nothing finer to recover.
-/// Per-exit user counts are additionally floored to a multiple of
-/// `exit_users_rounding`, so one person joining a small exit does not move
-/// its public count. Fleet-wide totals are exact: they say nothing about
-/// which exit anyone uses.
+///
+/// An exit's live figures (throughput, load, CPU, user count, history) are
+/// published only while at least `exit_live_threshold` people use it. On a
+/// quieter exit one person's download dominates the curve, and an observer
+/// of that person's own link could match the two and learn which exit a
+/// multi-hop circuit ends at. Such an exit shows its load band over the last
+/// closed 15-minute bucket and nothing else ([`ExitLiveStats::live`] is
+/// `false`). Per-exit user counts are floored to a multiple of
+/// `exit_users_rounding`. Fleet-wide totals are exact: they say nothing
+/// about which exit anyone uses.
 ///
 /// Only node-level aggregates appear here, never anything per client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -551,8 +557,11 @@ pub struct NetworkStatsResponse {
     /// period: polling faster returns the same snapshot.
     pub window_secs: u32,
     /// Granularity of [`ExitLiveStats::connected`]: per-exit counts are
-    /// floored to a multiple of this value. `1` means exact counts.
+    /// floored to a multiple of this value.
     pub exit_users_rounding: u32,
+    /// Fewest people an exit must carry for its live figures to be
+    /// published (see the privacy shape above).
+    pub exit_live_threshold: u32,
     /// Fleet-wide user totals.
     pub users: NetworkUserStats,
     /// Fleet-wide traffic and capacity.
@@ -568,9 +577,10 @@ pub struct NetworkStatsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkUserStats {
     /// Wallets registered on this network, whether their time has run out
-    /// or not. A deleted account is no longer counted.
+    /// or not. A deleted account is no longer counted. Refreshed once per
+    /// 15-minute bucket, so it does not time each registration.
     pub accounts_total: u64,
-    /// Wallets with time left at `generated_at`.
+    /// Wallets with time left, refreshed with `accounts_total`.
     pub subscribers_active: u64,
     /// People connected to an exit during the window (mean over the
     /// window, summed over the fleet, exact).
@@ -616,8 +626,14 @@ pub struct ExitLiveStats {
     pub city: String,
     /// `true` when the exit heartbeats and is not drained.
     pub online: bool,
+    /// `true` when the exit carried at least
+    /// [`NetworkStatsResponse::exit_live_threshold`] people during the
+    /// window, so its live figures are published. `false` leaves only
+    /// `load_level`, over the last closed 15-minute bucket; every other
+    /// live figure is zero, absent or empty.
+    pub live: bool,
     /// People connected during the window, floored to a multiple of
-    /// [`NetworkStatsResponse::exit_users_rounding`].
+    /// [`NetworkStatsResponse::exit_users_rounding`]. `0` when not `live`.
     pub connected: u32,
     /// Traffic this exit delivered to users over the window, bits/s.
     pub download_bps: u64,
@@ -631,7 +647,8 @@ pub struct ExitLiveStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_percent: Option<u8>,
     /// The band `load_percent` falls in, decided server-side so every
-    /// client colours the same exit the same way.
+    /// client colours the same exit the same way. For an exit that is not
+    /// `live`, the band of its last closed 15-minute bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_level: Option<LoadLevel>,
     /// The resource that set `load_percent`.
@@ -640,10 +657,13 @@ pub struct ExitLiveStats {
     /// Mean whole-box CPU use over the window, `0..=100`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<u8>,
-    /// Seconds since the exit process started.
+    /// Seconds since the exit process started, floored to whole days: an
+    /// exact start time would date each restart, and the reconnect burst it
+    /// causes is visible on every affected user's link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uptime_secs: Option<u64>,
-    /// This exit's recent windows, oldest first.
+    /// This exit's recent windows, oldest first. Only windows in which the
+    /// exit was `live` appear.
     pub history: Vec<ExitHistoryPoint>,
 }
 
