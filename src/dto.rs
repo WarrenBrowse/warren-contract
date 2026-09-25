@@ -534,14 +534,16 @@ pub struct NetworkInfoResponse {
 /// consecutive snapshots; tumbling windows leave nothing finer to recover.
 ///
 /// An exit's live figures (throughput, load, CPU, user count, history) are
-/// published only while at least `exit_live_threshold` people use it. On a
-/// quieter exit one person's download dominates the curve, and an observer
-/// of that person's own link could match the two and learn which exit a
-/// multi-hop circuit ends at. Such an exit shows its load band over the last
-/// closed 15-minute bucket and nothing else ([`ExitLiveStats::live`] is
-/// `false`). Per-exit user counts are floored to a multiple of
-/// `exit_users_rounding`. Fleet-wide totals are exact: they say nothing
-/// about which exit anyone uses.
+/// published only while at least `exit_live_threshold` people use it, over
+/// the window and over the last closed 15-minute bucket. On a quieter exit
+/// one person's download dominates the curve, and an observer of that
+/// person's own link could match the two and learn which exit a multi-hop
+/// circuit ends at. Such an exit shows its load band over the last hour and
+/// nothing else ([`ExitLiveStats::live`] is `false`). Per-exit user counts
+/// are floored to a multiple of `exit_users_rounding`. While any exit is
+/// live, the quiet ones enter the fleet totals by their last 15-minute
+/// bucket, so subtracting the published live exits from the fleet gives back
+/// nothing finer than that.
 ///
 /// Only node-level aggregates appear here, never anything per client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -628,9 +630,9 @@ pub struct ExitLiveStats {
     pub online: bool,
     /// `true` when the exit carried at least
     /// [`NetworkStatsResponse::exit_live_threshold`] people during the
-    /// window, so its live figures are published. `false` leaves only
-    /// `load_level`, over the last closed 15-minute bucket; every other
-    /// live figure is zero, absent or empty.
+    /// window and during the last closed 15-minute bucket, so its live
+    /// figures are published. `false` leaves only `load_level`, over the
+    /// last hour; every other live figure is zero, absent or empty.
     pub live: bool,
     /// People connected during the window, floored to a multiple of
     /// [`NetworkStatsResponse::exit_users_rounding`]. `0` when not `live`.
@@ -648,7 +650,7 @@ pub struct ExitLiveStats {
     pub load_percent: Option<u8>,
     /// The band `load_percent` falls in, decided server-side so every
     /// client colours the same exit the same way. For an exit that is not
-    /// `live`, the band of its last closed 15-minute bucket.
+    /// `live`, its band over the last hour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_level: Option<LoadLevel>,
     /// The resource that set `load_percent`.
@@ -657,9 +659,10 @@ pub struct ExitLiveStats {
     /// Mean whole-box CPU use over the window, `0..=100`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<u8>,
-    /// Seconds since the exit process started, floored to whole days: an
-    /// exact start time would date each restart, and the reconnect burst it
-    /// causes is visible on every affected user's link.
+    /// Seconds since the exit process started. Withheld by the reference
+    /// server: even floored to days, the drop to 0 dates a restart, and the
+    /// reconnect burst it causes is visible on every affected user's link.
+    /// Clients must render its absence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uptime_secs: Option<u64>,
     /// This exit's recent windows, oldest first. Only windows in which the
