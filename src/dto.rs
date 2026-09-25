@@ -587,7 +587,11 @@ pub struct NetworkUserStats {
     /// Wallets with time left, refreshed with `accounts_total`.
     pub subscribers_active: u64,
     /// People connected to an exit during the window (mean over the
-    /// window, summed over the fleet, exact).
+    /// window, summed over the fleet). Exact while no exit is `live`; while
+    /// one is, the quiet exits count by their last clock hour and the total
+    /// is floored to a multiple of
+    /// [`NetworkStatsResponse::exit_users_rounding`], so subtracting the
+    /// quiet part cannot give back a live exit's exact count.
     pub connected: u32,
 }
 
