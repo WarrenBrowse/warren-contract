@@ -2028,9 +2028,13 @@ pub struct AdminVoucherRedemptionsResponse {
     pub total: u64,
 }
 
-/// Response for `GET /v1/admin/subscribers/{pubkey_ss58}` - the
-/// server-side join behind the subscriber detail page: the subscription
-/// itself, every credit that funded it, and its active port-forwards.
+/// Response for `GET /v1/admin/subscribers/{pubkey_ss58}`: the
+/// server-side join behind the subscriber detail page, the subscription
+/// itself and every credit that funded it.
+///
+/// It carries no forwarded port: nothing links a port to an account
+/// outside the moment an abuse report is acted on. An older API that
+/// still sends a `port_forwards` panel parses, the field is ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminSubscriberDetailResponse {
     /// The subscription (expiry + active flag).
@@ -2039,8 +2043,6 @@ pub struct AdminSubscriberDetailResponse {
     /// first. Empty when the subscription was created by other means
     /// (e.g. a direct register without a voucher).
     pub funding_vouchers: Vec<AdminVoucherRow>,
-    /// Port-forward allocations currently owned by this subscriber.
-    pub port_forwards: Vec<AdminPortForwardRow>,
 }
 
 /// Request body for `POST /v1/admin/vouchers`.
@@ -4694,9 +4696,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn admin_subscriber_detail_response_carries_join_panels() {
-        let detail = AdminSubscriberDetailResponse {
+    fn subscriber_detail_fixture() -> AdminSubscriberDetailResponse {
+        AdminSubscriberDetailResponse {
             subscription: AdminSubscriptionRow {
                 pubkey_ss58: PubkeySs58::try_from(crate::ss58::encode(&[0x22; 32]))
                     .expect("valid SS58"),
@@ -4718,15 +4719,12 @@ mod tests {
                 valid_until: None,
                 redemptions_count: 0,
             }],
-            port_forwards: vec![AdminPortForwardRow {
-                exit_pubkey_ss58: PubkeySs58::try_from(crate::ss58::encode(&[0xee; 32]))
-                    .expect("valid SS58"),
-                port: 49200,
-                proto: Some(PortForwardProto::Tcp),
-                expires_at: 1_700_003_600,
-                exit_last_sync_unix_secs: Some(1_700_000_000),
-            }],
-        };
+        }
+    }
+
+    #[test]
+    fn admin_subscriber_detail_response_carries_join_panels() {
+        let detail = subscriber_detail_fixture();
         let json = serde_json::to_string(&detail).expect("serialize");
         let parsed: AdminSubscriberDetailResponse =
             serde_json::from_str(&json).expect("deserialize");
@@ -4735,7 +4733,25 @@ mod tests {
             1,
             "the funding-vouchers join panel must survive the round-trip"
         );
-        assert_eq!(parsed.port_forwards.len(), 1, "port-forward join panel too");
+        assert_eq!(parsed.subscription.expires_at, 1_800_000_000);
+    }
+
+    #[test]
+    fn admin_subscriber_detail_response_names_no_port_of_the_subscriber() {
+        let json = serde_json::to_value(subscriber_detail_fixture()).expect("serialize");
+        assert!(
+            json.get("port_forwards").is_none(),
+            "no record links a forwarded port to an account outside the moment of \
+             sanction, so the subscriber detail must not carry a port panel: {json}"
+        );
+    }
+
+    #[test]
+    fn admin_subscriber_detail_response_accepts_a_legacy_port_panel() {
+        let mut legacy = serde_json::to_value(subscriber_detail_fixture()).expect("serialize");
+        legacy["port_forwards"] = serde_json::json!([]);
+        let parsed: AdminSubscriberDetailResponse =
+            serde_json::from_value(legacy).expect("an older API still sending the panel parses");
         assert_eq!(parsed.subscription.expires_at, 1_800_000_000);
     }
 
