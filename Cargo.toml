@@ -59,6 +59,9 @@ sha2 = "0.10"
 hex = "0.4"
 # Canonical signature preimage of the signed release manifest.
 serde_json = "1"
+# Wire form of the route admission sealed blobs in the /v1 DTOs (base64url,
+# no padding).
+base64 = "0.22"
 
 [dev-dependencies]
 

@@ -133,6 +133,11 @@ pub enum ValidationError {
     /// (wrong scheme, userinfo, non-ASCII, whitespace, or over the cap).
     #[error("invalid announcement CTA url: {0}")]
     InvalidCtaUrl(String),
+    /// A sealed-to-API blob is not exactly [`SEALED_TO_API_LEN`] bytes of
+    /// base64url without padding. Carries nothing of the input: a blob is
+    /// an anchor handle, and doc 107 keeps it out of every log.
+    #[error("invalid sealed blob: expected {SEALED_TO_API_LEN} bytes as base64url without padding")]
+    InvalidSealedToApi,
 }
 
 /// Currency of the received payment. Used by the pricing policy to map
@@ -980,6 +985,14 @@ pub struct RegisterExitRequest {
     /// stored value). `None` from an exit binary that pre-dates the flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_fallback: Option<bool>,
+    /// Whether this exit admits route sessions by anchor and forwards anchor
+    /// registrations (`WARREN_ROUTE_ADMISSION`, warren-core doc 107). The API
+    /// lists the exits reporting `true` in
+    /// [`RouteAdmissionInfo::exit_ids_hex`]. Sticky server-side like
+    /// `tcp_fallback` (a heartbeat that omits it must not blank a stored
+    /// value). `None` from an exit binary that pre-dates the flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_admission: Option<bool>,
 
     // ---- Fleet identity components (doc: fleet naming scheme). All optional
     // and sticky server-side like `hwqual` / `port_forward`: a heartbeat from a
@@ -3465,9 +3478,16 @@ pub struct SessionOpenRequest {
     /// shape only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id_hex: Option<String>,
-    /// Exit currently serving this device (diagnostics; stored on the
-    /// lease). An operator label like `exit-fr-1`, NOT the 16-byte
+    /// Label of the exit serving this device, as the exit sees itself (on
+    /// the multihop path, the hex of its Ed25519 key). NOT the 16-byte
     /// [`ExitId`] used by [`RegisterExitRequest`].
+    ///
+    /// A current server ignores it and takes the lease slot label from the
+    /// caller's authenticated key (warren-core doc 107 section 8.6), so an
+    /// exit cannot claim another exit's slot. Exits keep sending it because
+    /// a server that predates that change requires it; an absent value
+    /// reads as empty.
+    #[serde(default)]
     pub exit_id: String,
     /// Optional cap override the exit may pass from its CLI. When
     /// absent, the server uses `warren_config::MAX_DEVICES_PER_ACCOUNT`.
@@ -3624,10 +3644,291 @@ pub struct SessionCloseRequest {
     /// it admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial_hex: Option<String>,
-    /// The closing exit's operator label, matching the `exit_id` the
-    /// lease was opened under. v2 shape only.
+    /// The closing exit's label, matching the `exit_id` the lease was
+    /// opened under. v2 shape only. Ignored by a current server, which
+    /// closes the slot of the caller's authenticated key (doc 107 section
+    /// 8.6); kept for servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_id: Option<String>,
+}
+
+// ---- Route admission by anchor (warren-core doc 107 section 8.2) ----
+//
+// Four exit-signed endpoints, registry-gated like `session/open`. None of
+// them names an exit: the API takes the caller's label and multihop exit id
+// from its authenticated key, so a locator sealed for one exit opens only
+// when that exit presents it. Every refusal is a 200 with a typed reason.
+//
+// No-log: serials, route serials and sealed blobs are anchor handles. The
+// manual `Debug` impls below render counts and verdicts only, never one of
+// them, not even a prefix (doc 107 section 8.7).
+
+/// Length of a `SealedToApi` blob: `key_id` (1 byte), the HPKE `enc` (32),
+/// and the ChaCha20-Poly1305 ciphertext of the 32-byte anchor secret with
+/// its tag (48), as a fixed tuple with no length prefix (doc 107 section
+/// 6.3).
+pub const SEALED_TO_API_LEN: usize = 81;
+
+/// A `SealedToApi` blob (the anchor secret HPKE-sealed to the API route KEM
+/// key), carried in JSON as base64url without padding. Only its length is
+/// checked here; the API opens it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SealedToApiBlob([u8; SEALED_TO_API_LEN]);
+
+impl SealedToApiBlob {
+    /// Wraps the raw encoding of a sealed blob.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; SEALED_TO_API_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw encoding, for the API to open.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; SEALED_TO_API_LEN] {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SealedToApiBlob {
+    type Error = ValidationError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .map_err(|_| ValidationError::InvalidSealedToApi)?;
+        <[u8; SEALED_TO_API_LEN]>::try_from(bytes.as_slice())
+            .map(Self)
+            .map_err(|_| ValidationError::InvalidSealedToApi)
+    }
+}
+
+impl From<SealedToApiBlob> for String {
+    fn from(blob: SealedToApiBlob) -> Self {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(blob.0)
+    }
+}
+
+impl fmt::Debug for SealedToApiBlob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SealedToApiBlob(<redacted>)")
+    }
+}
+
+/// `true` if `s` is exactly 64 lowercase hex chars (= a 32-byte route
+/// serial `r`, doc 107 section 6.4). Checked at the handler boundary, same
+/// posture as [`is_valid_token_serial_hex`], which covers anchor serials.
+#[must_use]
+pub fn is_valid_route_serial_hex(s: &str) -> bool {
+    is_lower_hex(s, TOKEN_SERIAL_HEX_LEN)
+}
+
+/// `POST /v1/session/route-anchor` request body (main exit -> API):
+/// registers, re-homes or confirms the anchor of one of the caller's live
+/// v7 main sessions.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SessionRouteAnchorRequest {
+    /// Token serial the main session was admitted on (32 bytes, 64
+    /// lowercase hex). The caller must hold its live lease, and the API
+    /// rebuilds the blob's associated data from it.
+    pub serial_hex: String,
+    /// The anchor secret sealed by the client to the API route KEM key,
+    /// bound to `serial_hex`.
+    pub sealed_anchor_b64: SealedToApiBlob,
+}
+
+impl fmt::Debug for SessionRouteAnchorRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteAnchorRequest")
+            .field("serial_hex", &"<redacted>")
+            .field("sealed_anchor_b64", &self.sealed_anchor_b64)
+            .finish()
+    }
+}
+
+/// Verdict of a `session/route-anchor` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RouteAnchorStatus {
+    /// The anchor is attached to the caller's main session (first attach,
+    /// re-home or confirmation).
+    Bound,
+    /// Refused; the reason says why.
+    Refused,
+    /// Forward compatibility: a status this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a `session/route-anchor` was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RouteAnchorRefusal {
+    /// The ledger holds no live lease of `serial_hex` held by the caller.
+    /// The exit asks the client for a current token.
+    NoLease,
+    /// The sealed blob does not open under the route KEM key with the
+    /// associated data of `serial_hex`.
+    InvalidSeal,
+    /// The anchor store is at capacity; renewals continue.
+    StoreFull,
+    /// Forward compatibility: a reason this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// `POST /v1/session/route-anchor` response body (always HTTP 200 once the
+/// caller is admitted to the endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRouteAnchorResponse {
+    /// Verdict.
+    pub status: RouteAnchorStatus,
+    /// Why it was refused; absent when bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RouteAnchorRefusal>,
+    /// R in force, relayed to the client in the anchor acknowledgement.
+    pub max_routes: u32,
+}
+
+/// `POST /v1/session/route-open` request body (route exit -> API): admits
+/// or renews a route session presented with a locator.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SessionRouteOpenRequest {
+    /// The anchor secret sealed by the client to the API route KEM key,
+    /// bound to the route exit's id. The body names no exit: the API
+    /// rebuilds the associated data from the caller's registry record.
+    pub locator_b64: SealedToApiBlob,
+}
+
+impl fmt::Debug for SessionRouteOpenRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteOpenRequest")
+            .field("locator_b64", &self.locator_b64)
+            .finish()
+    }
+}
+
+/// Why a `session/route-open` was refused (`admitted == false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RouteOpenRefusal {
+    /// No anchor, and the API is still inside its restore window after a
+    /// restart: the exit keeps the session and retries.
+    Restoring,
+    /// No live anchor behind the locator: the exit ends the route session.
+    AnchorUnknown,
+    /// The anchor already holds R route leases.
+    RouteLimit,
+    /// The locator does not open for the caller's exit id.
+    InvalidLocator,
+    /// Forward compatibility: a reason this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// `POST /v1/session/route-open` response body (always HTTP 200 once the
+/// caller is admitted to the endpoint).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRouteOpenResponse {
+    /// `true` when the route lease is held by the caller (fresh or renewed).
+    pub admitted: bool,
+    /// The route serial `r` (32 bytes, 64 lowercase hex), stable for this
+    /// anchor and this exit: the exit's sticky allocation key, and the
+    /// handle it renews and closes. Present when admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_serial_hex: Option<String>,
+    /// Why admission was refused; absent when admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RouteOpenRefusal>,
+}
+
+impl fmt::Debug for SessionRouteOpenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteOpenResponse")
+            .field("admitted", &self.admitted)
+            .field(
+                "route_serial_hex",
+                &self.route_serial_hex.as_ref().map(|_| "<redacted>"),
+            )
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+/// `POST /v1/session/route-renew` request body (exit -> API, every renewal
+/// tick). Each list holds at most the server's batch cap
+/// (`ROUTE_RENEW_BATCH_MAX` in warren-config); an absent list reads as
+/// empty.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRouteRenewRequest {
+    /// Token serials of the caller's anchored main sessions (64 lowercase
+    /// hex each).
+    #[serde(default)]
+    pub anchor_serials_hex: Vec<String>,
+    /// Route serials of the caller's live route sessions (64 lowercase hex
+    /// each).
+    #[serde(default)]
+    pub route_serials_hex: Vec<String>,
+}
+
+impl fmt::Debug for SessionRouteRenewRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteRenewRequest")
+            .field("anchor_serials", &self.anchor_serials_hex.len())
+            .field("route_serials", &self.route_serials_hex.len())
+            .finish()
+    }
+}
+
+/// `POST /v1/session/route-renew` response body: the entries of the request
+/// the API does not hold for the caller. Everything else was extended.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRouteRenewResponse {
+    /// Anchor serials with no anchor attached to (serial, caller). The main
+    /// exit tells the client its anchor is lost.
+    #[serde(default)]
+    pub unknown_anchor_serials_hex: Vec<String>,
+    /// Route serials the caller holds no lease for. The route exit
+    /// re-submits its retained locator to `session/route-open`.
+    #[serde(default)]
+    pub unknown_route_serials_hex: Vec<String>,
+}
+
+impl fmt::Debug for SessionRouteRenewResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteRenewResponse")
+            .field(
+                "unknown_anchor_serials",
+                &self.unknown_anchor_serials_hex.len(),
+            )
+            .field(
+                "unknown_route_serials",
+                &self.unknown_route_serials_hex.len(),
+            )
+            .finish()
+    }
+}
+
+/// `POST /v1/session/route-close` request body (route exit -> API, answered
+/// 204). Removes the caller's route leases; idempotent. There is no anchor
+/// close: an anchor outlives its main by the anchor TTL so a reconnecting
+/// main can re-home it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRouteCloseRequest {
+    /// Route serials to release (64 lowercase hex each).
+    pub route_serials_hex: Vec<String>,
+}
+
+impl fmt::Debug for SessionRouteCloseRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionRouteCloseRequest")
+            .field("route_serials", &self.route_serials_hex.len())
+            .finish()
+    }
 }
 
 // ---- Anonymous session credentials (Privacy Pass, ADR-0006 / doc 64) ----
@@ -3706,6 +4007,61 @@ pub struct TokenIssuerDirectory {
     pub prefetch_epochs: u64,
     /// One key per epoch in the published window.
     pub keys: Vec<TokenIssuerKey>,
+    /// Session directory only: route admission by anchor (warren-core doc
+    /// 107 section 8.1). Absent when the server has it off, and absent from
+    /// every server that predates it, so a document without it is
+    /// byte-identical to the one older clients already parse.
+    ///
+    /// Decoded leniently: a block this build cannot read (a later `version`
+    /// with a different shape, a malformed key or exit id) reads as `None`
+    /// instead of failing the directory, because every main session needs
+    /// this document for its tokens and a route falls back to a token route
+    /// when the feature is absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_route_admission"
+    )]
+    pub route_admission: Option<RouteAdmissionInfo>,
+}
+
+/// Version of the [`RouteAdmissionInfo`] block this build implements. A
+/// client uses the block only when its `version` equals this value.
+pub const ROUTE_ADMISSION_VERSION: u32 = 1;
+
+/// Route admission parameters served in the session token directory
+/// (`GET /v1/tokens/keys`, warren-core doc 107 section 8.1).
+///
+/// Unsigned beyond TLS, like the issuer keys beside it: a forged block can
+/// only make a client try route admission where it then fails (and falls
+/// back to a token route) or not try it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteAdmissionInfo {
+    /// Block version, [`ROUTE_ADMISSION_VERSION`] for this shape.
+    pub version: u32,
+    /// `key_id` of the API route KEM key below, carried in every sealed
+    /// blob so the API opens it with the right key across a rotation.
+    pub kem_key_id: u8,
+    /// The API route KEM public key (X25519, 32 bytes as 64 lowercase hex)
+    /// that anchor registrations and route locators are sealed to. Its
+    /// validity as a curve point is checked by the client, not here.
+    pub kem_pubkey_hex: PubkeyHex,
+    /// R: the most route sessions one anchor may hold at once.
+    pub max_routes_per_anchor: u32,
+    /// Exits currently admitting route sessions (active, fresh, and
+    /// reporting [`RegisterExitRequest::route_admission`]), as the 16-byte
+    /// multihop [`ExitId`] a locator is sealed to (32 lowercase hex each).
+    pub exit_ids_hex: Vec<ExitId>,
+}
+
+// JSON only: the lenient read buffers the block as a `serde_json::Value`,
+// which needs a self-describing format. The directory is an HTTP document.
+fn lenient_route_admission<'de, D>(deserializer: D) -> Result<Option<RouteAdmissionInfo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let block = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(block.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// One epoch's public key in a [`TokenIssuerDirectory`].
@@ -4554,6 +4910,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4605,6 +4962,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4656,6 +5014,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4701,6 +5060,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4750,6 +5110,7 @@ mod tests {
             edge_cert_sha256_hex: Some(pin.clone()),
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4808,6 +5169,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: Some(true),
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
@@ -4870,6 +5232,7 @@ mod tests {
             edge_cert_sha256_hex: None,
             port_forward: None,
             tcp_fallback: None,
+            route_admission: None,
             provider_code: None,
             provider: None,
             virt_code: None,
