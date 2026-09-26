@@ -1,7 +1,7 @@
 name: CI
 
-# Runs exclusively on the WarrenBrowse org self-hosted runners; do not switch
-# to a GitHub-hosted runner.
+# Runs on GitHub-hosted runners: free and unlimited for a public repo, and
+# faster than the self-hosted pools were.
 
 on:
   push:
@@ -16,18 +16,17 @@ env:
   RUSTFLAGS: "-D warnings"
 
 concurrency:
-  # A single self-hosted Linux runner serves these jobs; cancel superseded runs
-  # on the same ref so a burst of pushes cannot pile up a serial backlog.
+  # Cancel superseded runs on the same ref so a burst of pushes does not burn
+  # runner time on commits nobody will look at.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   anti-refrag:
     name: anti-refragmentation gate
-    # Self-hosted runners must never execute fork code: only same-repo events
-    # reach this job.
+    # Only same-repo events reach this job, a guard kept from the self-hosted era.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, libra]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +41,9 @@ jobs:
           if [ -n "${ENGINE_TOKEN:-}" ]; then
             URL="https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git"
           else
-            URL="git@github.com:WarrenBrowse/warrenguard.git"
+            URL="https://github.com/WarrenBrowse/warrenguard.git"
           fi
           rm -rf ../warrenguard
-          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
           git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -54,10 +52,9 @@ jobs:
 
   checks:
     name: fmt + clippy + test
-    # Self-hosted runners must never execute fork code: only same-repo events
-    # reach this job.
+    # Only same-repo events reach this job, a guard kept from the self-hosted era.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64, libra]
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # The test binaries replay the shared golden vectors (warren-vectors),
@@ -68,7 +65,7 @@ jobs:
       # The root [patch] redirects the pinned warrenguard git deps to the
       # sibling checkout, so CI clones it there at `.warrenguard-version`.
       # ENGINE_TOKEN (Contents:read on WarrenBrowse/warrenguard) is optional;
-      # without it the clone falls back to SSH.
+      # without it the clone falls back to anonymous HTTPS (the engine is public).
       - name: checkout warrenguard engine
         env:
           ENGINE_TOKEN: ${{ secrets.ENGINE_TOKEN }}
@@ -79,12 +76,9 @@ jobs:
           if [ -n "${ENGINE_TOKEN:-}" ]; then
             URL="https://x-access-token:${ENGINE_TOKEN}@github.com/WarrenBrowse/warrenguard.git"
           else
-            URL="git@github.com:WarrenBrowse/warrenguard.git"
+            URL="https://github.com/WarrenBrowse/warrenguard.git"
           fi
           rm -rf ../warrenguard
-          # cargo ships GitHub's host key built in but plain git does not, so
-          # pin-on-first-use here instead of failing on an empty known_hosts.
-          export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
           git clone --quiet "${URL}" ../warrenguard
           git -C ../warrenguard checkout --quiet "${REV}"
           echo "==> warrenguard checked out at $(git -C ../warrenguard rev-parse --short HEAD)"
@@ -105,6 +99,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # `seal` (attribution tag sealing, warren-api only) is off for every
