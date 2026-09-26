@@ -867,3 +867,495 @@ fn session_open_request_carries_max_devices_when_present() {
     );
     roundtrips(&req);
 }
+
+// ---------------------------------------------------------------------------
+// Session label hardening (warren-core doc 107 section 8.6).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_open_request_still_parses_without_the_ignored_exit_id() {
+    // The server derives the lease slot from the caller's authenticated key,
+    // so an exit may one day stop sending the label; the body must stay valid.
+    let token_b64 = "dG9rZW4".to_owned();
+    let req: SessionOpenRequest =
+        serde_json::from_value(serde_json::json!({ "token_b64": token_b64 }))
+            .expect("a v2 body without exit_id must deserialize");
+    assert_eq!(req.exit_id, "", "an absent exit_id reads as empty");
+    assert_eq!(req.token_b64.as_deref(), Some("dG9rZW4"));
+}
+
+#[test]
+fn session_open_request_keeps_sending_exit_id_for_older_servers() {
+    // A server that predates the hardening requires the field: the
+    // serialized body must keep it even though a current server ignores it.
+    let req = SessionOpenRequest {
+        pubkey_ss58: None,
+        device_id_hex: None,
+        exit_id: "ab".repeat(32),
+        max_devices: None,
+        token_b64: Some("dG9rZW4".to_owned()),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "exit_id": "ab".repeat(32), "token_b64": "dG9rZW4" }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Route admission by anchor (warren-core doc 107): token directory block,
+// exit heartbeat flag, and the four exit-signed session/route-* endpoints.
+// ---------------------------------------------------------------------------
+
+fn issuer_directory(route_admission: Option<RouteAdmissionInfo>) -> TokenIssuerDirectory {
+    TokenIssuerDirectory {
+        issuer_name: "warren".to_owned(),
+        token_type: 2,
+        epoch_secs: 3600,
+        context_label: "warren/session-token/v1".to_owned(),
+        quota_per_epoch: 3,
+        prefetch_epochs: 1,
+        keys: vec![TokenIssuerKey {
+            epoch: 7,
+            token_key_id: "11".repeat(32),
+            spki_b64: "c3BraQ".to_owned(),
+            not_before: 25_200,
+            not_after: 28_800,
+        }],
+        attribution_verifying_key_hex: None,
+        route_admission,
+    }
+}
+
+fn route_admission_info() -> RouteAdmissionInfo {
+    RouteAdmissionInfo {
+        version: ROUTE_ADMISSION_VERSION,
+        kem_key_id: 1,
+        kem_pubkey_hex: PubkeyHex::try_from("5a".repeat(32).as_str()).unwrap(),
+        max_routes_per_anchor: 32,
+        exit_ids_hex: vec![
+            ExitId::from_bytes([0x01; 16]),
+            ExitId::from_bytes([0xfe; 16]),
+        ],
+    }
+}
+
+fn today_directory_json() -> serde_json::Value {
+    serde_json::json!({
+        "issuer_name": "warren",
+        "token_type": 2,
+        "epoch_secs": 3600,
+        "context_label": "warren/session-token/v1",
+        "quota_per_epoch": 3,
+        "prefetch_epochs": 1,
+        "keys": [{
+            "epoch": 7,
+            "token_key_id": "11".repeat(32),
+            "spki_b64": "c3BraQ",
+            "not_before": 25_200,
+            "not_after": 28_800,
+        }],
+    })
+}
+
+#[test]
+fn token_directory_without_route_admission_is_byte_identical_to_today() {
+    let dir = issuer_directory(None);
+    assert_eq!(
+        json(&dir),
+        today_directory_json(),
+        "a server with route admission off must serve exactly today's document"
+    );
+    let parsed: TokenIssuerDirectory = serde_json::from_value(today_directory_json()).unwrap();
+    assert!(parsed.route_admission.is_none());
+    roundtrips(&dir);
+}
+
+#[test]
+fn token_directory_route_admission_shape() {
+    let dir = issuer_directory(Some(route_admission_info()));
+    let mut expected = today_directory_json();
+    expected["route_admission"] = serde_json::json!({
+        "version": 1,
+        "kem_key_id": 1,
+        "kem_pubkey_hex": "5a".repeat(32),
+        "max_routes_per_anchor": 32,
+        "exit_ids_hex": ["01".repeat(16), "fe".repeat(16)],
+    });
+    assert_eq!(json(&dir), expected);
+    let back: TokenIssuerDirectory = serde_json::from_value(expected).unwrap();
+    assert_eq!(back.route_admission, Some(route_admission_info()));
+    roundtrips(&dir);
+}
+
+#[test]
+fn route_admission_version_is_one() {
+    assert_eq!(
+        ROUTE_ADMISSION_VERSION, 1,
+        "doc 107 freezes the first route admission block as version 1"
+    );
+}
+
+#[test]
+fn a_malformed_route_admission_block_withdraws_the_feature_without_failing_the_directory() {
+    // The token directory is on the critical path of every main session: a
+    // route admission block this build cannot read must cost the client route
+    // admission (token routes take over), never its tokens.
+    let malformed = [
+        serde_json::json!({ "version": 1 }),
+        serde_json::json!("not an object"),
+        serde_json::json!({
+            "version": 1, "kem_key_id": 1, "kem_pubkey_hex": "zz",
+            "max_routes_per_anchor": 32, "exit_ids_hex": [],
+        }),
+        serde_json::json!({
+            "version": 1, "kem_key_id": 1, "kem_pubkey_hex": "5a".repeat(32),
+            "max_routes_per_anchor": 32, "exit_ids_hex": ["short"],
+        }),
+        serde_json::json!({
+            "version": 2, "kem_key_id": 300, "kem_pubkey_hex": "5a".repeat(32),
+            "max_routes_per_anchor": 32, "exit_ids_hex": [],
+        }),
+        serde_json::Value::Null,
+    ];
+    for block in malformed {
+        let mut doc = today_directory_json();
+        doc["route_admission"] = block.clone();
+        let parsed: TokenIssuerDirectory = serde_json::from_value(doc)
+            .unwrap_or_else(|e| panic!("directory must survive route_admission {block}: {e}"));
+        assert!(
+            parsed.route_admission.is_none(),
+            "an unreadable block reads as absent: {block}"
+        );
+        assert_eq!(parsed.keys.len(), 1, "the issuer keys are intact");
+    }
+}
+
+#[test]
+fn route_admission_block_tolerates_a_future_field() {
+    let mut doc = today_directory_json();
+    doc["route_admission"] = serde_json::json!({
+        "version": 1,
+        "kem_key_id": 1,
+        "kem_pubkey_hex": "5a".repeat(32),
+        "max_routes_per_anchor": 32,
+        "exit_ids_hex": ["01".repeat(16), "fe".repeat(16)],
+        "a_field_from_a_later_server": true,
+    });
+    let parsed: TokenIssuerDirectory = serde_json::from_value(doc).unwrap();
+    assert_eq!(parsed.route_admission, Some(route_admission_info()));
+}
+
+#[test]
+fn register_exit_request_route_admission_flag_is_optional() {
+    let legacy = serde_json::json!({
+        "endpoints": [],
+        "country": "FI",
+        "city": "Helsinki",
+        "weight": 100,
+    });
+    let mut req: RegisterExitRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(req.route_admission, None, "an older exit omits the flag");
+    let value = json(&req);
+    assert!(
+        value.get("route_admission").is_none(),
+        "an absent flag stays off the wire: {value}"
+    );
+
+    req.route_admission = Some(true);
+    let value = json(&req);
+    assert_eq!(value["route_admission"], serde_json::json!(true));
+    let back: RegisterExitRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back.route_admission, Some(true));
+    roundtrips(&back);
+}
+
+#[test]
+fn sealed_to_api_blob_is_81_bytes_base64url_without_padding() {
+    let mut bytes = [0u8; SEALED_TO_API_LEN];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::try_from(i).unwrap().wrapping_mul(37);
+    }
+    let blob = SealedToApiBlob::from_bytes(bytes);
+    let value = json(&blob);
+    let s = value.as_str().expect("a JSON string");
+    assert_eq!(s.len(), 108, "81 bytes are 108 base64 chars, no padding");
+    assert!(
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "url-safe alphabet: {s}"
+    );
+    let back: SealedToApiBlob = serde_json::from_value(value).unwrap();
+    assert_eq!(back.as_bytes(), &bytes);
+    assert_eq!(SEALED_TO_API_LEN, 81, "doc 107 section 6.3");
+}
+
+#[test]
+fn sealed_to_api_blob_rejects_every_other_shape() {
+    // 0xfb bytes encode to both url-safe characters, so the standard
+    // alphabet rewrite below really differs from the accepted form.
+    let good = SealedToApiBlob::from_bytes([0xfb; SEALED_TO_API_LEN]);
+    let good_str = json(&good).as_str().unwrap().to_owned();
+    assert!(
+        good_str.contains('-') && good_str.contains('_'),
+        "{good_str}"
+    );
+    let bad = [
+        String::new(),
+        good_str[..104].to_owned(),                   // 78 bytes
+        format!("{good_str}AAAA"),                    // 84 bytes
+        format!("{}=", &good_str[..107]),             // padding
+        good_str.replace('-', "+").replace('_', "/"), // standard alphabet
+        "!".repeat(108),
+    ];
+    for s in bad {
+        let err = serde_json::from_value::<SealedToApiBlob>(serde_json::json!(s)).unwrap_err();
+        assert!(
+            !err.to_string().contains(&good_str[..16]),
+            "the error must not echo the blob: {err}"
+        );
+    }
+}
+
+#[test]
+fn session_route_anchor_request_shape() {
+    let req = SessionRouteAnchorRequest {
+        serial_hex: "0a".repeat(32),
+        sealed_anchor_b64: SealedToApiBlob::from_bytes([0x33; SEALED_TO_API_LEN]),
+    };
+    let value = json(&req);
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "serial_hex": "0a".repeat(32),
+            "sealed_anchor_b64": json(&SealedToApiBlob::from_bytes([0x33; SEALED_TO_API_LEN])),
+        })
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn session_route_anchor_response_shapes() {
+    let bound = SessionRouteAnchorResponse {
+        status: RouteAnchorStatus::Bound,
+        reason: None,
+        max_routes: 32,
+    };
+    assert_eq!(
+        json(&bound),
+        serde_json::json!({ "status": "bound", "max_routes": 32 })
+    );
+    roundtrips(&bound);
+
+    let refused = SessionRouteAnchorResponse {
+        status: RouteAnchorStatus::Refused,
+        reason: Some(RouteAnchorRefusal::NoLease),
+        max_routes: 32,
+    };
+    assert_eq!(
+        json(&refused),
+        serde_json::json!({ "status": "refused", "reason": "no_lease", "max_routes": 32 })
+    );
+    roundtrips(&refused);
+}
+
+#[test]
+fn route_anchor_refusal_wire_names_are_frozen() {
+    for (reason, wire) in [
+        (RouteAnchorRefusal::NoLease, "no_lease"),
+        (RouteAnchorRefusal::InvalidSeal, "invalid_seal"),
+        (RouteAnchorRefusal::StoreFull, "store_full"),
+    ] {
+        assert_eq!(json(&reason), serde_json::json!(wire));
+    }
+    assert_eq!(json(&RouteAnchorStatus::Bound), serde_json::json!("bound"));
+    assert_eq!(
+        json(&RouteAnchorStatus::Refused),
+        serde_json::json!("refused")
+    );
+}
+
+#[test]
+fn unknown_route_anchor_status_and_reason_decode_as_unknown() {
+    let resp: SessionRouteAnchorResponse = serde_json::from_value(serde_json::json!({
+        "status": "a_later_status",
+        "reason": "a_later_reason",
+        "max_routes": 32,
+    }))
+    .expect("a later server's verdict must not fail the exit's decode");
+    assert_eq!(resp.status, RouteAnchorStatus::Unknown);
+    assert_eq!(resp.reason, Some(RouteAnchorRefusal::Unknown));
+}
+
+#[test]
+fn session_route_open_request_shape() {
+    let blob = SealedToApiBlob::from_bytes([0x44; SEALED_TO_API_LEN]);
+    let req = SessionRouteOpenRequest {
+        locator_b64: blob.clone(),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "locator_b64": json(&blob) }),
+        "the route exit names no exit: the API takes it from the caller's key"
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn session_route_open_response_shapes() {
+    let admitted = SessionRouteOpenResponse {
+        admitted: true,
+        route_serial_hex: Some("7e".repeat(32)),
+        reason: None,
+    };
+    assert_eq!(
+        json(&admitted),
+        serde_json::json!({ "admitted": true, "route_serial_hex": "7e".repeat(32) })
+    );
+    roundtrips(&admitted);
+
+    let refused = SessionRouteOpenResponse {
+        admitted: false,
+        route_serial_hex: None,
+        reason: Some(RouteOpenRefusal::RouteLimit),
+    };
+    assert_eq!(
+        json(&refused),
+        serde_json::json!({ "admitted": false, "reason": "route_limit" })
+    );
+    roundtrips(&refused);
+}
+
+#[test]
+fn route_open_refusal_wire_names_are_frozen() {
+    for (reason, wire) in [
+        (RouteOpenRefusal::Restoring, "restoring"),
+        (RouteOpenRefusal::AnchorUnknown, "anchor_unknown"),
+        (RouteOpenRefusal::RouteLimit, "route_limit"),
+        (RouteOpenRefusal::InvalidLocator, "invalid_locator"),
+    ] {
+        assert_eq!(json(&reason), serde_json::json!(wire));
+    }
+    let later: RouteOpenRefusal = serde_json::from_value(serde_json::json!("a_later_reason"))
+        .expect("an unknown reason must decode");
+    assert_eq!(later, RouteOpenRefusal::Unknown);
+}
+
+#[test]
+fn session_route_renew_shapes() {
+    let req = SessionRouteRenewRequest {
+        anchor_serials_hex: vec!["01".repeat(32)],
+        route_serials_hex: vec!["02".repeat(32), "03".repeat(32)],
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "anchor_serials_hex": ["01".repeat(32)],
+            "route_serials_hex": ["02".repeat(32), "03".repeat(32)],
+        })
+    );
+    roundtrips(&req);
+
+    let resp = SessionRouteRenewResponse {
+        unknown_anchor_serials_hex: Vec::new(),
+        unknown_route_serials_hex: vec!["03".repeat(32)],
+    };
+    assert_eq!(
+        json(&resp),
+        serde_json::json!({
+            "unknown_anchor_serials_hex": [],
+            "unknown_route_serials_hex": ["03".repeat(32)],
+        }),
+        "both lists are always written, empty included"
+    );
+    roundtrips(&resp);
+}
+
+#[test]
+fn session_route_renew_lists_default_to_empty_when_absent() {
+    let req: SessionRouteRenewRequest =
+        serde_json::from_value(serde_json::json!({ "route_serials_hex": ["02".repeat(32)] }))
+            .unwrap();
+    assert!(req.anchor_serials_hex.is_empty());
+    assert_eq!(req.route_serials_hex.len(), 1);
+    let resp: SessionRouteRenewResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(resp.unknown_anchor_serials_hex.is_empty());
+    assert!(resp.unknown_route_serials_hex.is_empty());
+}
+
+#[test]
+fn session_route_close_request_shape() {
+    let req = SessionRouteCloseRequest {
+        route_serials_hex: vec!["04".repeat(32)],
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "route_serials_hex": ["04".repeat(32)] })
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn route_dtos_never_print_a_serial_or_a_blob() {
+    let serial = "9d".repeat(32);
+    let blob = SealedToApiBlob::from_bytes([0x5c; SEALED_TO_API_LEN]);
+    let blob_str = json(&blob).as_str().unwrap().to_owned();
+    let rendered = [
+        format!("{blob:?}"),
+        format!(
+            "{:?}",
+            SessionRouteAnchorRequest {
+                serial_hex: serial.clone(),
+                sealed_anchor_b64: blob.clone(),
+            }
+        ),
+        format!(
+            "{:?}",
+            SessionRouteOpenRequest {
+                locator_b64: blob.clone(),
+            }
+        ),
+        format!(
+            "{:?}",
+            SessionRouteOpenResponse {
+                admitted: true,
+                route_serial_hex: Some(serial.clone()),
+                reason: None,
+            }
+        ),
+        format!(
+            "{:?}",
+            SessionRouteRenewRequest {
+                anchor_serials_hex: vec![serial.clone()],
+                route_serials_hex: vec![serial.clone()],
+            }
+        ),
+        format!(
+            "{:?}",
+            SessionRouteRenewResponse {
+                unknown_anchor_serials_hex: vec![serial.clone()],
+                unknown_route_serials_hex: vec![serial.clone()],
+            }
+        ),
+        format!(
+            "{:?}",
+            SessionRouteCloseRequest {
+                route_serials_hex: vec![serial.clone()],
+            }
+        ),
+    ];
+    for line in rendered {
+        assert!(
+            !line.contains(&serial[..8]) && !line.contains(&blob_str[..8]),
+            "doc 107 section 8.7: no serial, prefix of a serial or blob in any log: {line}"
+        );
+    }
+}
+
+#[test]
+fn route_serial_hex_validator_accepts_exactly_64_lowercase_hex() {
+    assert!(is_valid_route_serial_hex(&"ab".repeat(32)));
+    assert!(!is_valid_route_serial_hex(&"AB".repeat(32)));
+    assert!(!is_valid_route_serial_hex(&"ab".repeat(31)));
+    assert!(!is_valid_route_serial_hex(&"ab".repeat(33)));
+    assert!(!is_valid_route_serial_hex(&"zz".repeat(32)));
+}
