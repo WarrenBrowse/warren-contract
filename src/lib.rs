@@ -18,6 +18,8 @@
 //!   sequence.
 //! - [`pf_attribution`]: the port-forward attribution tag and the
 //!   entitlement envelope carried in the NAT-PMP credential trailer.
+//! - [`route_kem`]: the API's signature over the route KEM key it serves in
+//!   the session token directory.
 //!
 //! The `warren-discovery` workspace member (crate `warren-discovery-core`)
 //! carries the signed relay list / roster / multi-hop directory formats and
@@ -32,6 +34,7 @@ pub mod pf_attribution;
 pub mod phase;
 pub mod product;
 pub mod release;
+pub mod route_kem;
 pub mod ss58;
 
 /// Redacts an untrusted input for error display: at most the first 8

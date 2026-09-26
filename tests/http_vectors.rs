@@ -936,6 +936,7 @@ fn route_admission_info() -> RouteAdmissionInfo {
             ExitId::from_bytes([0x01; 16]),
             ExitId::from_bytes([0xfe; 16]),
         ],
+        kem_signature: None,
     }
 }
 
@@ -988,6 +989,24 @@ fn token_directory_route_admission_shape() {
 }
 
 #[test]
+fn token_directory_route_admission_carries_the_kem_signature() {
+    let mut info = route_admission_info();
+    info.kem_signature = Some(RouteKemSignature {
+        valid_until: 1_790_035_200,
+        signature_hex: "d5".repeat(64),
+    });
+    let dir = issuer_directory(Some(info.clone()));
+    let value = json(&dir);
+    assert_eq!(
+        value["route_admission"]["kem_signature"],
+        serde_json::json!({ "valid_until": 1_790_035_200_u64, "signature_hex": "d5".repeat(64) }),
+    );
+    let back: TokenIssuerDirectory = serde_json::from_value(value).unwrap();
+    assert_eq!(back.route_admission, Some(info));
+    roundtrips(&dir);
+}
+
+#[test]
 fn route_admission_version_is_one() {
     assert_eq!(
         ROUTE_ADMISSION_VERSION, 1,
@@ -1014,6 +1033,11 @@ fn a_malformed_route_admission_block_withdraws_the_feature_without_failing_the_d
         serde_json::json!({
             "version": 2, "kem_key_id": 300, "kem_pubkey_hex": "5a".repeat(32),
             "max_routes_per_anchor": 32, "exit_ids_hex": [],
+        }),
+        serde_json::json!({
+            "version": 1, "kem_key_id": 1, "kem_pubkey_hex": "5a".repeat(32),
+            "max_routes_per_anchor": 32, "exit_ids_hex": [],
+            "kem_signature": { "signature_hex": "00".repeat(64) },
         }),
         serde_json::Value::Null,
     ];

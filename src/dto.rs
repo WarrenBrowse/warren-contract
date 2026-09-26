@@ -4295,7 +4295,8 @@ pub struct TokenIssuerDirectory {
     /// with a different shape, a malformed key or exit id) reads as `None`
     /// instead of failing the directory, because every main session needs
     /// this document for its tokens and a route falls back to a token route
-    /// when the feature is absent.
+    /// when the feature is absent. A block that decodes is still untrusted
+    /// until [`crate::route_kem::verify`] accepts its signature.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4311,9 +4312,15 @@ pub const ROUTE_ADMISSION_VERSION: u32 = 1;
 /// Route admission parameters served in the session token directory
 /// (`GET /v1/tokens/keys`, warren-core doc 107 section 8.1).
 ///
-/// Unsigned beyond TLS, like the issuer keys beside it: a forged block can
-/// only make a client try route admission where it then fails (and falls
-/// back to a token route) or not try it.
+/// The document travels over TLS only, and the KEM key is what every anchor
+/// and route locator is sealed to: whoever could serve a key of its own
+/// would open them and link a device's main session to its routes across
+/// exits. So a client seals to the key only once [`crate::route_kem::verify`]
+/// has checked [`Self::kem_signature`] against the server key it pins; an
+/// absent or invalid signature makes route admission unavailable. The other
+/// fields are not signed: a forged route limit or exit list can only make a
+/// client try route admission where it then fails (and falls back to a token
+/// route) or not try it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteAdmissionInfo {
     /// Block version, [`ROUTE_ADMISSION_VERSION`] for this shape.
@@ -4331,6 +4338,23 @@ pub struct RouteAdmissionInfo {
     /// reporting [`RegisterExitRequest::route_admission`]), as the 16-byte
     /// multihop [`ExitId`] a locator is sealed to (32 lowercase hex each).
     pub exit_ids_hex: Vec<ExitId>,
+    /// The API server key's signature over the KEM key (warren-core doc 107
+    /// section 6.5). Absent from a server that predates it, and then the key
+    /// is not used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kem_signature: Option<RouteKemSignature>,
+}
+
+/// The API's Ed25519 signature over the route KEM key of a
+/// [`RouteAdmissionInfo`], made and checked by [`crate::route_kem`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteKemSignature {
+    /// Unix seconds from which the signature no longer vouches for the key
+    /// (exclusive).
+    pub valid_until: u64,
+    /// 128 lowercase hex characters: the Ed25519 signature over
+    /// [`crate::route_kem::signed_message`].
+    pub signature_hex: String,
 }
 
 // JSON only: the lenient read buffers the block as a `serde_json::Value`,
