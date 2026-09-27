@@ -18,10 +18,10 @@ members = ["warren-discovery"]
 # a consumer's [patch] does not apply to path-sourced deps). Local dev and CI
 # override these with the sibling `../warrenguard` via the `[patch]` at the foot
 # of this file. Keep the rev in lockstep with `.warrenguard-version`.
-warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "2247c05b0f9db3071525c9a12c1ce0b6bd80db24" }
-warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "2247c05b0f9db3071525c9a12c1ce0b6bd80db24" }
+warrenguard-wire = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "1b483c644c00c722f7e1e67ecaa7d06a5c8053c8" }
+warrenguard-multihop = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "1b483c644c00c722f7e1e67ecaa7d06a5c8053c8" }
 # Dev-only: anchors the entitlement envelope's token length on the engine's.
-warrenguard-token = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "2247c05b0f9db3071525c9a12c1ce0b6bd80db24" }
+warrenguard-token = { git = "https://github.com/WarrenBrowse/warrenguard.git", rev = "1b483c644c00c722f7e1e67ecaa7d06a5c8053c8" }
 
 # Lints applied to every crate in the workspace via `[lints] workspace = true`.
 # Mirrors warren-sdk-rs / warren-core policy: zero unsafe, deny correctness,
