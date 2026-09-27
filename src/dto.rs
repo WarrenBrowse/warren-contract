@@ -1323,6 +1323,33 @@ pub struct ExitTelemetry {
     /// legs only, no client identifiers (doc 52 invariant I2 style).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_legs: Option<Vec<RelayLegTelemetry>>,
+    /// Setups this node served or refused, by admission kind, since process
+    /// start. `None` (off the wire) from an exit binary that predates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admissions: Option<ExitAdmissionTelemetry>,
+}
+
+/// Setups an exit served or refused since process start, by the admission
+/// the client asked for: wallet-signed (the exit learns the account) or an
+/// anonymous session token. One per setup, so a bonded client counts each of
+/// its connections. Node totals only, never a label naming a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ExitAdmissionTelemetry {
+    /// Wallet-signed setups served.
+    pub wallet_admitted_total: u64,
+    /// Wallet-signed setups refused by the authorization gate (no active
+    /// subscription, no valid proof of possession, banned).
+    pub wallet_refused_total: u64,
+    /// Wallet-signed setups refused because the account already held its
+    /// maximum of simultaneous sessions.
+    pub wallet_device_limit_total: u64,
+    /// Wallet-signed setups refused because the server no longer admits
+    /// wallet-signed sessions for the account.
+    pub wallet_retired_total: u64,
+    /// Token setups served.
+    pub token_admitted_total: u64,
+    /// Token setups refused (no valid token, or its serial held elsewhere).
+    pub token_refused_total: u64,
 }
 
 /// One relay->exit forwarding leg of a dual-role node, as sampled from the
@@ -3802,6 +3829,9 @@ pub enum SessionRejectReason {
     /// v2: another live lease already holds this token serial (a
     /// double-spend from a different exit).
     SerialInUse,
+    /// Legacy shape: the server no longer admits wallet-signed sessions for
+    /// this account. The exit refuses the session like a device limit.
+    WalletSessionsRetired,
     /// Forward compatibility: a reason this build does not know.
     #[serde(other)]
     Unknown,

@@ -144,6 +144,22 @@ fn session_open_response_shape() {
 }
 
 #[test]
+fn a_retired_wallet_session_refusal_has_its_own_reason() {
+    let resp = SessionOpenResponse {
+        admitted: false,
+        max: 0,
+        current: 0,
+        reason: Some(SessionRejectReason::WalletSessionsRetired),
+    };
+    assert_eq!(
+        json(&resp)["reason"],
+        "wallet_sessions_retired",
+        "the exit counts a retirement apart from a device limit"
+    );
+    roundtrips(&resp);
+}
+
+#[test]
 fn incident_reason_screaming_snake_case() {
     assert_eq!(json(&IncidentReason::Timeout), serde_json::json!("TIMEOUT"));
     assert_eq!(
@@ -309,8 +325,28 @@ fn exit_telemetry_shape() {
         uptime_secs: 3_600,
         drain_clients_remaining: None,
         relay_legs: None,
+        admissions: Some(ExitAdmissionTelemetry {
+            wallet_admitted_total: 40,
+            wallet_refused_total: 2,
+            wallet_device_limit_total: 3,
+            wallet_retired_total: 0,
+            token_admitted_total: 900,
+            token_refused_total: 7,
+        }),
     };
     let v = json(&full);
+    assert_eq!(
+        v["admissions"],
+        serde_json::json!({
+            "wallet_admitted_total": 40,
+            "wallet_refused_total": 2,
+            "wallet_device_limit_total": 3,
+            "wallet_retired_total": 0,
+            "token_admitted_total": 900,
+            "token_refused_total": 7,
+        }),
+        "setups by admission kind ride the heartbeat as cumulative counters"
+    );
     assert_eq!(
         v["bytes_tx_total"], 10,
         "cumulative counters are plain u64 fields"
@@ -337,6 +373,11 @@ fn exit_telemetry_shape() {
         v.get("steal_percent"),
         None,
         "an exit binary predating steal_percent omits it, so the wire is unchanged for old nodes"
+    );
+    assert_eq!(
+        v.get("admissions"),
+        None,
+        "an exit binary predating the admission counters omits them"
     );
     roundtrips(&sparse);
 }
