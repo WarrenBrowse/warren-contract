@@ -1205,9 +1205,10 @@ pub struct RegisterExitRequest {
     /// Whether this exit admits route sessions by anchor and forwards anchor
     /// registrations (`WARREN_ROUTE_ADMISSION`, warren-core doc 107). The API
     /// lists the exits reporting `true` in
-    /// [`RouteAdmissionInfo::exit_ids_hex`]. Sticky server-side like
-    /// `tcp_fallback` (a heartbeat that omits it must not blank a stored
-    /// value). `None` from an exit binary that pre-dates the flag.
+    /// [`RouteAdmissionInfo::exit_ids_hex`]. Kept server-side across a
+    /// heartbeat that omits it from the same build, cleared by one that omits
+    /// it from another build (a node rolled back to a binary that predates
+    /// the flag). `None` from an exit binary that pre-dates the flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_admission: Option<bool>,
 
@@ -1327,6 +1328,33 @@ pub struct ExitTelemetry {
     /// start. `None` (off the wire) from an exit binary that predates them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admissions: Option<ExitAdmissionTelemetry>,
+    /// Epoch lease refresh events this node saw since process start.
+    /// `None` (off the wire) from an exit binary that predates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_refresh: Option<ExitLeaseRefreshTelemetry>,
+}
+
+/// Epoch lease refresh events an exit saw since process start (warren-core
+/// doc 107 section 5.5): a session admitted on a token moves its lease onto a
+/// token of each new epoch, and the exit may end one that does not. Node
+/// totals only, never a label naming a client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ExitLeaseRefreshTelemetry {
+    /// Sessions whose client announced that it refreshes its lease.
+    pub announced_total: u64,
+    /// Leases moved onto a token of the current epoch.
+    pub refreshed_total: u64,
+    /// Refresh tokens the exit refused.
+    pub refused_total: u64,
+    /// Leases found of a past epoch on a session whose client had announced
+    /// that it refreshes, once per stale lease.
+    pub stale_capable_total: u64,
+    /// The same on a session whose client had not: an older client, or one
+    /// withholding the announcement. Its share of the stale leases is the
+    /// adoption signal the enforcement switch waits on.
+    pub stale_incapable_total: u64,
+    /// Sessions the exit ended because their lease was not refreshed in time.
+    pub expired_total: u64,
 }
 
 /// Setups an exit served or refused since process start, by the admission
@@ -1524,6 +1552,14 @@ pub struct RegisterExitResponse {
     /// the transport (and warren-api itself) adds no update authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<SignedReleaseManifest>,
+    /// The API asks every exit to end a session admitted on a token whose
+    /// lease stays of a past epoch past the exit's grace window, whether or
+    /// not its client announced that it refreshes (warren-core doc 107
+    /// section 5.5, `WARREN_EPOCH_LEASE_ENFORCE`). While `false`, exits end
+    /// only the sessions of clients that announced it. Omitted when `false`,
+    /// so the response of an API with the switch off is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub epoch_lease_enforce: bool,
 }
 
 /// Where an exit's update agent stands, reported on each heartbeat.

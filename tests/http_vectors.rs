@@ -194,6 +194,7 @@ fn register_exit_response_update_directive_shape() {
     let resp = RegisterExitResponse {
         drain: None,
         update: Some(manifest),
+        epoch_lease_enforce: false,
     };
     let v = json(&resp);
     assert_eq!(v["update"]["release_version"], "v0.7.0-3-gabc1234");
@@ -203,6 +204,28 @@ fn register_exit_response_update_directive_shape() {
         "absent drain must stay omitted next to a present update"
     );
     roundtrips(&resp);
+}
+
+#[test]
+fn register_exit_response_epoch_lease_enforce_shape() {
+    // Off, the flag stays off the wire, so every heartbeat response is
+    // byte-identical to before the switch existed; on, it is a plain bool an
+    // exit that predates it ignores.
+    let off = RegisterExitResponse::default();
+    assert!(!off.epoch_lease_enforce);
+    assert_eq!(json(&off), serde_json::json!({}));
+    let on = RegisterExitResponse {
+        epoch_lease_enforce: true,
+        ..RegisterExitResponse::default()
+    };
+    assert_eq!(
+        json(&on),
+        serde_json::json!({ "epoch_lease_enforce": true })
+    );
+    roundtrips(&on);
+    let legacy: RegisterExitResponse =
+        serde_json::from_value(serde_json::json!({})).expect("an API that predates the flag");
+    assert!(!legacy.epoch_lease_enforce);
 }
 
 #[test]
@@ -333,8 +356,28 @@ fn exit_telemetry_shape() {
             token_admitted_total: 900,
             token_refused_total: 7,
         }),
+        lease_refresh: Some(ExitLeaseRefreshTelemetry {
+            announced_total: 850,
+            refreshed_total: 800,
+            refused_total: 12,
+            stale_capable_total: 810,
+            stale_incapable_total: 90,
+            expired_total: 4,
+        }),
     };
     let v = json(&full);
+    assert_eq!(
+        v["lease_refresh"],
+        serde_json::json!({
+            "announced_total": 850,
+            "refreshed_total": 800,
+            "refused_total": 12,
+            "stale_capable_total": 810,
+            "stale_incapable_total": 90,
+            "expired_total": 4,
+        }),
+        "epoch lease refresh events ride the heartbeat as cumulative counters"
+    );
     assert_eq!(
         v["admissions"],
         serde_json::json!({
@@ -378,6 +421,11 @@ fn exit_telemetry_shape() {
         v.get("admissions"),
         None,
         "an exit binary predating the admission counters omits them"
+    );
+    assert_eq!(
+        v.get("lease_refresh"),
+        None,
+        "an exit binary predating the lease refresh counters omits them"
     );
     roundtrips(&sparse);
 }
