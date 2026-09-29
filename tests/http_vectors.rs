@@ -1472,3 +1472,145 @@ fn route_serial_hex_validator_accepts_exactly_64_lowercase_hex() {
     assert!(!is_valid_route_serial_hex(&"ab".repeat(33)));
     assert!(!is_valid_route_serial_hex(&"zz".repeat(32)));
 }
+
+// ---------------------------------------------------------------------------
+// Crypto payment rails (doc 91). The tokens and the DTO shapes already
+// exercised in src/dto.rs are not re-pinned here; what follows covers only
+// the assertions this file adds: the no-log redaction of a rejected rail
+// token, the explicit-null serialization of the optional payment fields,
+// and the previously untested withdrawal request/ack pair.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn payment_method_rejects_an_unknown_token_redacted() {
+    // The rejected value is untrusted (could be a mispasted secret), so
+    // the error carries only the 8-char redacted prefix.
+    let err = PaymentMethod::from_wire("a-very-long-mispasted-secret-value").unwrap_err();
+    assert_eq!(err.to_string(), "unknown payment method: a-very-l…");
+}
+
+#[test]
+fn admin_pending_voucher_row_serializes_absent_rail_metadata_as_null() {
+    // Rows recorded before the provider/currency metadata existed omit
+    // the fields; `serde(default)` keeps them parseable as None. On
+    // serialize the attrs are parse-side only, so a None field writes an
+    // explicit null and consumers may rely on the keys being present.
+    // Full-document equality: indexing a missing key also yields Null, so
+    // a per-field compare could not pin the explicit nulls.
+    let legacy = serde_json::json!({
+        "pending_id": "pv_legacy_01",
+        "expires_at": 1_700_086_400u64,
+    });
+    let parsed: AdminPendingVoucherRow =
+        serde_json::from_value(legacy).expect("a pre-metadata row must deserialize");
+    assert_eq!(parsed.provider, None);
+    assert_eq!(parsed.currency, None);
+    assert_eq!(parsed.amount_units, None);
+    assert_eq!(
+        json(&parsed),
+        serde_json::json!({
+            "pending_id": "pv_legacy_01",
+            "expires_at": 1_700_086_400u64,
+            "provider": null,
+            "currency": null,
+            "amount_units": null,
+        }),
+        "None rail metadata serializes as explicit nulls, not omitted keys"
+    );
+}
+
+#[test]
+fn admin_wpid_invoice_binding_row_serializes_absent_fields_as_null() {
+    // The btcpay rail is priced at settlement, so it locks neither the
+    // native amount nor the duration; the invoice expiry is still carried.
+    let btcpay_binding = AdminWpidInvoiceBindingRow {
+        rail: "btcpay".to_owned(),
+        expires_at_unix: Some(1_700_086_400),
+        locked_amount_native: None,
+        granted_duration_secs: None,
+    };
+    assert_eq!(
+        json(&btcpay_binding),
+        serde_json::json!({
+            "rail": "btcpay",
+            "expires_at_unix": 1_700_086_400u64,
+            "locked_amount_native": null,
+            "granted_duration_secs": null,
+        }),
+        "absent binding fields serialize as nulls, not omitted keys"
+    );
+    roundtrips(&btcpay_binding);
+}
+
+#[test]
+fn admin_wpid_lookup_response_serializes_unredeemed_voucher_as_null() {
+    // voucher_redeemed is None while nothing has settled; it must reach
+    // the wire as an explicit null, not an omitted key.
+    let open = AdminWpidLookupResponse {
+        bindings: vec![AdminWpidInvoiceBindingRow {
+            rail: "solana".to_owned(),
+            expires_at_unix: Some(1_700_086_400),
+            locked_amount_native: Some(5_000_000_000),
+            granted_duration_secs: Some(2_592_000),
+        }],
+        settled: false,
+        voucher_pull_pending: false,
+        voucher_redeemed: None,
+    };
+    assert_eq!(
+        json(&open),
+        serde_json::json!({
+            "bindings": [{
+                "rail": "solana",
+                "expires_at_unix": 1_700_086_400u64,
+                "locked_amount_native": 5_000_000_000u64,
+                "granted_duration_secs": 2_592_000u64,
+            }],
+            "settled": false,
+            "voucher_pull_pending": false,
+            "voucher_redeemed": null,
+        })
+    );
+    roundtrips(&open);
+}
+
+#[test]
+fn admin_voucher_row_legacy_parse_defaults_single_redemption() {
+    // A row that pre-dates the cancel/campaign fields still parses, with
+    // single-use as the assumed redemption cap.
+    let legacy = serde_json::json!({
+        "secret_hash_hex": "deadbeef",
+        "duration_secs": 2_592_000u64,
+        "payment_method": "lightning",
+        "created_at": 1_700_000_000u64,
+        "redeemed_at": null,
+        "is_redeemed": false,
+        "redeemed_by_pubkey_ss58": null,
+    });
+    let parsed: AdminVoucherRow =
+        serde_json::from_value(legacy).expect("a pre-campaign row must deserialize");
+    assert_eq!(parsed.payment_method, PaymentMethod::Lightning);
+    assert_eq!(parsed.cancelled_at, None);
+    assert_eq!(parsed.max_redemptions, Some(1));
+    assert_eq!(parsed.redemptions_count, 0);
+}
+
+#[test]
+fn withdrawal_request_and_ack_shape() {
+    // The no-auth website-facing body carries only the payment
+    // reference; identity stays with the PSP.
+    let req = WithdrawalRequestBody {
+        payment_ref: "pi_3PqExample".to_owned(),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({ "payment_ref": "pi_3PqExample" })
+    );
+    roundtrips(&req);
+
+    let ack = WithdrawalAck {
+        reference: "wda_01".to_owned(),
+    };
+    assert_eq!(json(&ack), serde_json::json!({ "reference": "wda_01" }));
+    roundtrips(&ack);
+}
