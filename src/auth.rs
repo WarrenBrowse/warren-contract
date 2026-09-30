@@ -11,6 +11,12 @@ pub const HEADER_TIMESTAMP: &str = "X-Warren-Timestamp";
 /// Per-request random nonce (hex), anti-replay.
 pub const HEADER_NONCE: &str = "X-Warren-Nonce";
 
+/// How far, in seconds and either side of its own clock, a server accepts the
+/// [`HEADER_TIMESTAMP`] of a signed request. A stamp outside it is refused
+/// before the signature is checked, with a
+/// [`crate::dto::AuthRefusal::ClockSkew`] body.
+pub const SIGNATURE_WINDOW_SECS: u64 = 60;
+
 /// Builds the canonical message that is signed and verified.
 ///
 /// Format frozen: never change without rotating to `/v2`. Must stay strictly
@@ -110,6 +116,14 @@ pub fn sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_signature_window_is_one_minute_either_side_of_the_server_clock() {
+        // warren-api and the forum broker both refuse a stamp further than
+        // this from their own clock, and the clients decide from it whether
+        // their clock needs correcting: a change here moves all of them.
+        assert_eq!(SIGNATURE_WINDOW_SECS, 60);
+    }
 
     #[test]
     fn canonical_message_is_byte_stable() {

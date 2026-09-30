@@ -4485,6 +4485,19 @@ impl BanReasonCode {
     }
 }
 
+/// Body of a `401` refusing a wallet-signed request for a reason the client
+/// can act on. Internally tagged on `error`; a `401` with any other body (or
+/// none) is a refusal the client cannot fix by itself (bad key, replay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AuthRefusal {
+    /// The request's timestamp is further than
+    /// [`crate::auth::SIGNATURE_WINDOW_SECS`] from the server's clock: the
+    /// device clock is off, and the key may well be fine.
+    ClockSkew,
+}
+
 /// Body of a refused `POST /v1/tokens/issue` or
 /// `POST /v1/port-entitlements/issue` (HTTP 403), so the app can show the
 /// suspension without dialing an exit. Internally tagged on `error`.

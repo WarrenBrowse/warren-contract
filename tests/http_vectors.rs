@@ -1614,3 +1614,24 @@ fn withdrawal_request_and_ack_shape() {
     assert_eq!(json(&ack), serde_json::json!({ "reference": "wda_01" }));
     roundtrips(&ack);
 }
+
+#[test]
+fn clock_skew_refusal_is_the_connect_token_byte_for_byte() {
+    // The forum broker already answers a stamp outside its window with these
+    // exact bytes (forum_login_v1 vectors), and the clients match them as a
+    // body token. warren-api answers the same refusal the same way, so one
+    // client check covers both hosts.
+    let body = r#"{"error":"clock_skew"}"#;
+    assert_eq!(
+        serde_json::to_string(&AuthRefusal::ClockSkew).unwrap(),
+        body
+    );
+    assert_eq!(
+        serde_json::from_str::<AuthRefusal>(body).unwrap(),
+        AuthRefusal::ClockSkew
+    );
+    assert!(
+        serde_json::from_str::<AuthRefusal>(r#"{"error":"banned","reason_code":"other"}"#).is_err(),
+        "another refusal must not read as a clock refusal"
+    );
+}
