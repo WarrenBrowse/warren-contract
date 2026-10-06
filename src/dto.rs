@@ -125,6 +125,9 @@ pub enum ValidationError {
     /// Payment-method string is not one of the known wire tokens.
     #[error("unknown payment method: {0}")]
     InvalidPaymentMethod(String),
+    /// Currency string is not one of the known wire tokens.
+    #[error("unknown currency: {0}")]
+    InvalidCurrency(String),
     /// A CRL revocation reason contains a line break, which would make
     /// the signed canonical message ambiguous (see
     /// [`crl_canonical_message`]).
@@ -195,6 +198,39 @@ pub enum Currency {
 }
 
 impl Currency {
+    /// Parse an uppercase wire token into the matching variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::InvalidCurrency`] carrying only a redacted
+    /// prefix of the input: the value is untrusted and could be a mispasted
+    /// secret (no-log discipline).
+    pub fn from_wire(s: &str) -> Result<Self, ValidationError> {
+        match s {
+            "EUR" => Ok(Self::EUR),
+            "USD" => Ok(Self::USD),
+            "BTC" => Ok(Self::BTC),
+            "XMR" => Ok(Self::XMR),
+            "SAT" => Ok(Self::SAT),
+            "RON" => Ok(Self::RON),
+            "CAD" => Ok(Self::CAD),
+            "GBP" => Ok(Self::GBP),
+            "CHF" => Ok(Self::CHF),
+            "DOT" => Ok(Self::DOT),
+            "SOL" => Ok(Self::SOL),
+            "ZEC" => Ok(Self::ZEC),
+            "USDC" => Ok(Self::USDC),
+            "USDT" => Ok(Self::USDT),
+            "USDG" => Ok(Self::USDG),
+            "USDS" => Ok(Self::USDS),
+            "EURC" => Ok(Self::EURC),
+            "ETH" => Ok(Self::ETH),
+            "BNB" => Ok(Self::BNB),
+            "XRP" => Ok(Self::XRP),
+            other => Err(ValidationError::InvalidCurrency(crate::redact(other))),
+        }
+    }
+
     /// Uppercase ASCII wire token (`"EUR"`, `"SAT"`, ...).
     #[must_use]
     pub fn as_wire(&self) -> &'static str {
@@ -5950,6 +5986,37 @@ mod tests {
             serde_json::from_str::<Currency>("\"eur\"").is_err(),
             "lowercase must be rejected (rename_all = UPPERCASE contract)"
         );
+    }
+
+    #[test]
+    fn currency_from_wire_round_trips_with_as_wire() {
+        for v in [
+            Currency::EUR,
+            Currency::USD,
+            Currency::BTC,
+            Currency::XMR,
+            Currency::SAT,
+            Currency::RON,
+            Currency::CAD,
+            Currency::GBP,
+            Currency::CHF,
+            Currency::DOT,
+            Currency::SOL,
+            Currency::ZEC,
+            Currency::USDC,
+            Currency::USDT,
+            Currency::USDG,
+            Currency::USDS,
+            Currency::EURC,
+            Currency::ETH,
+            Currency::BNB,
+            Currency::XRP,
+        ] {
+            let parsed = Currency::from_wire(v.as_wire()).expect("round-trip");
+            assert_eq!(parsed, v);
+        }
+        assert!(Currency::from_wire("eur").is_err());
+        assert!(Currency::from_wire("").is_err());
     }
 
     #[test]
