@@ -172,6 +172,26 @@ pub enum Currency {
     /// Solana, denominated in whole SOL. Smallest unit is the lamport
     /// (9 decimals: `1 SOL = 10^9 lamport`).
     SOL,
+    /// Zcash, denominated in whole ZEC. Smallest unit is the zatoshi
+    /// (8 decimals: `1 ZEC = 10^8 zatoshi`).
+    ZEC,
+    /// USD Coin (6 decimals on every supported chain).
+    USDC,
+    /// Tether USD (6 decimals on every supported chain).
+    USDT,
+    /// Global Dollar (6 decimals on Solana SPL).
+    USDG,
+    /// Sky Dollar (6 decimals on Solana SPL).
+    USDS,
+    /// Euro Coin (6 decimals on Solana SPL).
+    EURC,
+    /// Ether, denominated in whole ETH. Smallest unit is the token's own
+    /// base unit on the chain that carried the payment.
+    ETH,
+    /// BNB, denominated in whole BNB.
+    BNB,
+    /// XRP, denominated in whole XRP.
+    XRP,
 }
 
 impl Currency {
@@ -190,6 +210,15 @@ impl Currency {
             Self::CHF => "CHF",
             Self::DOT => "DOT",
             Self::SOL => "SOL",
+            Self::ZEC => "ZEC",
+            Self::USDC => "USDC",
+            Self::USDT => "USDT",
+            Self::USDG => "USDG",
+            Self::USDS => "USDS",
+            Self::EURC => "EURC",
+            Self::ETH => "ETH",
+            Self::BNB => "BNB",
+            Self::XRP => "XRP",
         }
     }
 }
@@ -361,7 +390,12 @@ pub enum PaymentMethod {
     Polkadot,
     /// Solana (SOL) via Solana Pay, self-hosted watcher against a
     /// third-party RPC (doc 91 SS3.4/SS3.5: same reasoning as Polkadot).
+    /// Also covers SPL-token payments on the same rail: the method names
+    /// the rail, [`Currency`] names the settled asset.
     Solana,
+    /// Zcash (ZEC), shielded receiving through diversified addresses,
+    /// watched over a third-party wallet/indexer RPC (doc 91 SS3.7).
+    Zcash,
 }
 
 impl PaymentMethod {
@@ -385,6 +419,7 @@ impl PaymentMethod {
             "paypal" => Ok(Self::Paypal),
             "polkadot" => Ok(Self::Polkadot),
             "solana" => Ok(Self::Solana),
+            "zcash" => Ok(Self::Zcash),
             other => Err(ValidationError::InvalidPaymentMethod(crate::redact(other))),
         }
     }
@@ -404,6 +439,7 @@ impl PaymentMethod {
             Self::Paypal => "paypal",
             Self::Polkadot => "polkadot",
             Self::Solana => "solana",
+            Self::Zcash => "zcash",
         }
     }
 }
@@ -4698,6 +4734,7 @@ mod tests {
             ("\"paypal\"", PaymentMethod::Paypal),
             ("\"polkadot\"", PaymentMethod::Polkadot),
             ("\"solana\"", PaymentMethod::Solana),
+            ("\"zcash\"", PaymentMethod::Zcash),
         ] {
             let pm: PaymentMethod = serde_json::from_str(wire).expect("deserialize");
             assert_eq!(pm, expected, "wire {wire:?} must parse to {expected:?}");
@@ -4730,6 +4767,7 @@ mod tests {
             PaymentMethod::Paypal,
             PaymentMethod::Polkadot,
             PaymentMethod::Solana,
+            PaymentMethod::Zcash,
         ] {
             let parsed = PaymentMethod::from_wire(v.as_wire()).expect("round-trip");
             assert_eq!(parsed, v);
@@ -5889,6 +5927,15 @@ mod tests {
             (Currency::CHF, "\"CHF\""),
             (Currency::DOT, "\"DOT\""),
             (Currency::SOL, "\"SOL\""),
+            (Currency::ZEC, "\"ZEC\""),
+            (Currency::USDC, "\"USDC\""),
+            (Currency::USDT, "\"USDT\""),
+            (Currency::USDG, "\"USDG\""),
+            (Currency::USDS, "\"USDS\""),
+            (Currency::EURC, "\"EURC\""),
+            (Currency::ETH, "\"ETH\""),
+            (Currency::BNB, "\"BNB\""),
+            (Currency::XRP, "\"XRP\""),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, expected, "variant {variant:?} wire form");
