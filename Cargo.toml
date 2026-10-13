@@ -79,6 +79,11 @@ seal = ["dep:chacha20poly1305", "dep:rand_core"]
 
 [dev-dependencies]
 warrenguard-token = { workspace = true }
+# warrenguard-token pins rsa 0.10.0-rc.18, whose `pkcs1 = "0.8.0-rc.4"` requirement
+# also accepts pkcs1 0.8.0-rc.5 (2026-10-05), an API break that stops rsa from
+# compiling. This repo has no lockfile, so every CI run resolves afresh: hold
+# pkcs1 at the release rsa rc.18 was built against until the engine moves rsa.
+pkcs1 = { version = "=0.8.0-rc.4", default-features = false }
 
 # Local-dev / CI override: resolve the WarrenGuard engine crates from the
 # sibling checkout (`../warrenguard`) instead of fetching the pinned git rev in
