@@ -1367,6 +1367,17 @@ pub struct ExitTelemetry {
     /// `None` from an exit binary that predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steal_percent: Option<f32>,
+    /// Whether the exit's own DNS resolver, the one its clients are handed
+    /// inside the tunnel, answered the exit's last self-probe with an address.
+    ///
+    /// A resolver can fail while every other counter here looks healthy: on
+    /// 2026-10-11 the root DNS zone started signing with a key the exits did
+    /// not trust, and every resolver of the fleet answered SERVFAIL to any
+    /// name not already cached, for two days, with no signal anywhere.
+    ///
+    /// `None` from an exit binary that does not probe its resolver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_resolver_ok: Option<bool>,
     /// Resident set size of the exit process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_rss_bytes: Option<u64>,
