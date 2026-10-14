@@ -1620,9 +1620,70 @@ fn withdrawal_request_and_ack_shape() {
 
     let ack = WithdrawalAck {
         reference: "wda_01".to_owned(),
+        ..WithdrawalAck::default()
     };
     assert_eq!(json(&ack), serde_json::json!({ "reference": "wda_01" }));
     roundtrips(&ack);
+}
+
+#[test]
+fn withdrawal_ack_carries_the_declaration_time_and_the_refund_owed() {
+    // The acknowledgement is the consumer's durable-medium proof (CRD art.
+    // 11a): it names when the declaration was made and, when the server can
+    // resolve it, what will be refunded once the share of service supplied
+    // is kept.
+    let ack = WithdrawalAck {
+        reference: "wda_02".to_owned(),
+        submitted_at: Some("2026-10-14T09:30:00Z".to_owned()),
+        refund_amount_minor: Some(467),
+        currency: Some("EUR".to_owned()),
+    };
+    assert_eq!(
+        json(&ack),
+        serde_json::json!({
+            "reference": "wda_02",
+            "submitted_at": "2026-10-14T09:30:00Z",
+            "refund_amount_minor": 467,
+            "currency": "EUR"
+        })
+    );
+    roundtrips(&ack);
+
+    // A server that predates these fields still parses: they are optional.
+    let legacy: WithdrawalAck =
+        serde_json::from_value(serde_json::json!({ "reference": "wda_03" }))
+            .expect("a pre-field acknowledgement must deserialize");
+    assert_eq!(legacy.submitted_at, None);
+    assert_eq!(legacy.refund_amount_minor, None);
+    assert_eq!(legacy.currency, None);
+}
+
+#[test]
+fn signed_crypto_refund_request_shape() {
+    // POST /v1/account/refund/by-wpid: the wallet signature is the proof of
+    // purchase, so the body carries only the order and the payout address.
+    let req = SignedCryptoRefundRequest {
+        wpid: "0123456789abcdef0123456789abcdef".to_owned(),
+        refund_address: Some("bc1qexampleaddress".to_owned()),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "wpid": "0123456789abcdef0123456789abcdef",
+            "refund_address": "bc1qexampleaddress"
+        })
+    );
+    roundtrips(&req);
+
+    let bare = SignedCryptoRefundRequest {
+        wpid: "0123456789abcdef0123456789abcdef".to_owned(),
+        refund_address: None,
+    };
+    assert_eq!(
+        json(&bare),
+        serde_json::json!({ "wpid": "0123456789abcdef0123456789abcdef" })
+    );
+    roundtrips(&bare);
 }
 
 #[test]

@@ -3165,14 +3165,46 @@ pub struct WithdrawalRequestBody {
     pub payment_ref: String,
 }
 
-/// 200 response for `POST /v1/withdrawal`.
+/// 200 response for `POST /v1/withdrawal`, `POST /v1/checkout/refund/by-wpid`
+/// and `POST /v1/account/refund/by-wpid`.
 ///
 /// `reference` is a random acknowledgement id the consumer keeps as proof
 /// of their declaration (durable-medium acknowledgement, art. 11/13 CRD).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The optional fields complete that proof when the server can resolve them;
+/// a server that predates them omits them and a client must tolerate that.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WithdrawalAck {
     /// Random reference id for the recorded declaration.
     pub reference: String,
+    /// When the declaration was recorded, RFC 3339 in UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<String>,
+    /// What will be refunded, in minor units of `currency`: the price, less
+    /// the share of service already supplied when the buyer asked for the
+    /// service to start at once (terms §11.1). `None` when the server cannot
+    /// resolve the price at declaration time; the refund is then settled by
+    /// the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_amount_minor: Option<i64>,
+    /// ISO 4217 code of `refund_amount_minor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+}
+
+/// Request body for the wallet-signed `POST /v1/account/refund/by-wpid`.
+///
+/// The withdrawal declaration of a crypto purchase whose voucher the app
+/// pulled and redeemed itself: the signature of the redeeming wallet is the
+/// proof of purchase, so no voucher code travels. Answered with a
+/// [`WithdrawalAck`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedCryptoRefundRequest {
+    /// The purchase's wpid (32 hex chars).
+    pub wpid: String,
+    /// Address the operator sends the crypto refund to, supplied by the
+    /// buyer (Warren never derives one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_address: Option<String>,
 }
 
 /// One row of the admin withdrawal queue.
