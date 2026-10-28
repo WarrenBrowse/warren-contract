@@ -142,6 +142,10 @@ pub enum ValidationError {
     /// an anchor handle, and doc 107 keeps it out of every log.
     #[error("invalid sealed blob: expected {SEALED_TO_API_LEN} bytes as base64url without padding")]
     InvalidSealedToApi,
+    /// A device id is not exactly [`DEVICE_ID_LEN`] bytes of base64url
+    /// without padding.
+    #[error("invalid device id: expected {DEVICE_ID_LEN} bytes as base64url without padding")]
+    InvalidDeviceId,
 }
 
 /// Currency of the received payment. Used by the pricing policy to map
@@ -4391,6 +4395,10 @@ impl fmt::Debug for SessionRouteCloseRequest {
 pub struct TokenIssueRequest {
     /// Per-epoch blinded batches.
     pub epochs: Vec<TokenEpochRequest>,
+    /// The registered device asking (warren-core doc 115). Absent from the
+    /// wire when `None`, so an unregistered client sends the original body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<DeviceId>,
 }
 
 /// One epoch's blinded batch in a [`TokenIssueRequest`].
@@ -4400,6 +4408,138 @@ pub struct TokenEpochRequest {
     pub epoch: u64,
     /// Base64url (no pad) blinded messages, one per requested token.
     pub blinded: Vec<String>,
+}
+
+// ---- Device registry (warren-core doc 115) ----
+
+/// Length in bytes of a [`DeviceId`].
+pub const DEVICE_ID_LEN: usize = 16;
+
+/// Random identifier of one install, drawn by the client and kept in its
+/// state directory. Base64url without padding on the wire. Names an install
+/// to its own account only: it never reaches an exit and is never derived
+/// from the wallet.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct DeviceId([u8; DEVICE_ID_LEN]);
+
+impl DeviceId {
+    /// Wraps raw bytes (the client draws them from its CSPRNG).
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; DEVICE_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; DEVICE_ID_LEN] {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for DeviceId {
+    type Error = ValidationError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .map_err(|_| ValidationError::InvalidDeviceId)?;
+        <[u8; DEVICE_ID_LEN]>::try_from(bytes.as_slice())
+            .map(Self)
+            .map_err(|_| ValidationError::InvalidDeviceId)
+    }
+}
+
+impl From<DeviceId> for String {
+    fn from(id: DeviceId) -> Self {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id.0)
+    }
+}
+
+impl fmt::Debug for DeviceId {
+    // A short prefix is enough to tell two devices apart in a test failure.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DeviceId({:02x}{:02x}..)", self.0[0], self.0[1])
+    }
+}
+
+/// The platform a device runs on, as its list line shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePlatform {
+    /// Android app.
+    Android,
+    /// iOS app.
+    Ios,
+    /// macOS desktop app.
+    Macos,
+    /// Windows desktop app.
+    Windows,
+    /// Linux desktop app.
+    Linux,
+    /// A command-line client (warren-cli, wclaude).
+    Cli,
+    /// The browser extension's helper.
+    Browser,
+    /// A platform this build does not know, so a newer server's list still
+    /// parses.
+    #[serde(other)]
+    Other,
+}
+
+/// `POST /v1/devices` body (wallet-signed): registers the install, or
+/// refreshes its name, version and last-seen day when it is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRegistration {
+    /// The install.
+    pub device_id: DeviceId,
+    /// Generated at install time from a word list, renamable.
+    pub name: String,
+    /// Where it runs.
+    pub platform: DevicePlatform,
+    /// The app version, semver.
+    pub app_version: String,
+}
+
+/// One device of an account, as `GET /v1/devices` and `POST /v1/devices`
+/// answer it. Dates are `YYYY-MM-DD` (UTC): the registry keeps no finer
+/// activity than the day.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceView {
+    /// The install.
+    pub device_id: DeviceId,
+    /// Its name.
+    pub name: String,
+    /// Where it runs.
+    pub platform: DevicePlatform,
+    /// The app version it last registered with.
+    pub app_version: String,
+    /// The day it registered.
+    pub registered_on: String,
+    /// The last day it was seen.
+    pub last_seen_on: String,
+    /// Whether it is the device that signed this request.
+    pub this_device: bool,
+}
+
+/// `GET /v1/devices` response (wallet-signed request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceListResponse {
+    /// The account's active devices.
+    pub devices: Vec<DeviceView>,
+    /// The last day an older client of the account (one that does not
+    /// register) had its token reservation superseded by a registered device.
+    /// Absent when none ever was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_client_seen_on: Option<String>,
+}
+
+/// `PATCH /v1/devices/{device_id}` body (wallet-signed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRename {
+    /// The new name.
+    pub name: String,
 }
 
 /// `POST /v1/tokens/issue` response body (always HTTP 200; per-epoch outcome
@@ -4620,6 +4760,12 @@ pub enum AuthRefusal {
 #[serde(tag = "error", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IssuanceRefusal {
+    /// The device named by the request was revoked from another device of
+    /// the account: the client disconnects and forgets its identity.
+    DeviceRevoked,
+    /// The device named by the request is not registered: the client
+    /// registers it (`POST /v1/devices`), then asks again.
+    DeviceUnregistered,
     /// The wallet is on the CRL.
     Banned {
         /// Why.

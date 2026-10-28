@@ -1706,3 +1706,162 @@ fn clock_skew_refusal_is_the_connect_token_byte_for_byte() {
         "another refusal must not read as a clock refusal"
     );
 }
+
+// ---- Device registry (warren-core doc 115) ----
+
+const DEVICE_ID_B64: &str = "AAECAwQFBgcICQoLDA0ODw";
+
+fn device_id() -> DeviceId {
+    DeviceId::try_from(DEVICE_ID_B64.to_owned()).expect("16 bytes, base64url")
+}
+
+#[test]
+fn a_device_id_is_sixteen_bytes_of_base64url() {
+    assert_eq!(
+        device_id().as_bytes(),
+        &core::array::from_fn::<u8, 16, _>(|i| i as u8)
+    );
+    assert_eq!(String::from(device_id()), DEVICE_ID_B64);
+    assert!(
+        DeviceId::try_from("AAECAwQFBgcICQoLDA0O".to_owned()).is_err(),
+        "15 bytes"
+    );
+    assert!(
+        DeviceId::try_from("AAECAwQFBgcICQoLDA0ODxA".to_owned()).is_err(),
+        "17 bytes"
+    );
+    assert!(DeviceId::try_from("not base64url!".to_owned()).is_err());
+}
+
+#[test]
+fn device_registration_shape() {
+    let req = DeviceRegistration {
+        device_id: device_id(),
+        name: "Lapin Rapide".to_owned(),
+        platform: DevicePlatform::Android,
+        app_version: "1.1.55".to_owned(),
+    };
+    assert_eq!(
+        json(&req),
+        serde_json::json!({
+            "device_id": DEVICE_ID_B64,
+            "name": "Lapin Rapide",
+            "platform": "android",
+            "app_version": "1.1.55"
+        })
+    );
+    roundtrips(&req);
+}
+
+#[test]
+fn a_platform_this_build_does_not_know_reads_as_other() {
+    // A newer server may list a platform an older client never heard of; the
+    // list must still parse.
+    let platform: DevicePlatform =
+        serde_json::from_value(serde_json::json!("vision_os")).expect("tolerated");
+    assert_eq!(platform, DevicePlatform::Other);
+    for (p, wire) in [
+        (DevicePlatform::Android, "android"),
+        (DevicePlatform::Ios, "ios"),
+        (DevicePlatform::Macos, "macos"),
+        (DevicePlatform::Windows, "windows"),
+        (DevicePlatform::Linux, "linux"),
+        (DevicePlatform::Cli, "cli"),
+        (DevicePlatform::Browser, "browser"),
+    ] {
+        assert_eq!(json(&p), serde_json::json!(wire));
+    }
+}
+
+#[test]
+fn device_list_shape() {
+    let list = DeviceListResponse {
+        devices: vec![DeviceView {
+            device_id: device_id(),
+            name: "Lapin Rapide".to_owned(),
+            platform: DevicePlatform::Macos,
+            app_version: "1.1.55".to_owned(),
+            registered_on: "2026-10-28".to_owned(),
+            last_seen_on: "2026-10-29".to_owned(),
+            this_device: true,
+        }],
+        older_client_seen_on: Some("2026-10-29".to_owned()),
+    };
+    assert_eq!(
+        json(&list),
+        serde_json::json!({
+            "devices": [{
+                "device_id": DEVICE_ID_B64,
+                "name": "Lapin Rapide",
+                "platform": "macos",
+                "app_version": "1.1.55",
+                "registered_on": "2026-10-28",
+                "last_seen_on": "2026-10-29",
+                "this_device": true
+            }],
+            "older_client_seen_on": "2026-10-29"
+        })
+    );
+    roundtrips(&list);
+
+    // No older client seen: the field is absent, and its absence parses.
+    let quiet = DeviceListResponse {
+        devices: Vec::new(),
+        older_client_seen_on: None,
+    };
+    assert_eq!(json(&quiet), serde_json::json!({ "devices": [] }));
+    roundtrips(&quiet);
+}
+
+#[test]
+fn device_rename_shape() {
+    let req = DeviceRename {
+        name: "Bureau".to_owned(),
+    };
+    assert_eq!(json(&req), serde_json::json!({ "name": "Bureau" }));
+    roundtrips(&req);
+}
+
+#[test]
+fn a_token_issue_request_names_its_device_only_when_it_has_one() {
+    let epochs = vec![TokenEpochRequest {
+        epoch: 498112,
+        blinded: vec!["YmxpbmQ".to_owned()],
+    }];
+    // An unregistered client's body is byte-identical to the original wire.
+    let anonymous = TokenIssueRequest {
+        epochs: epochs.clone(),
+        device_id: None,
+    };
+    assert_eq!(
+        json(&anonymous),
+        serde_json::json!({ "epochs": [{ "epoch": 498112, "blinded": ["YmxpbmQ"] }] })
+    );
+    let legacy: TokenIssueRequest =
+        serde_json::from_value(json(&anonymous)).expect("a body without device_id must parse");
+    assert!(legacy.device_id.is_none());
+
+    let identified = TokenIssueRequest {
+        epochs,
+        device_id: Some(device_id()),
+    };
+    assert_eq!(
+        json(&identified)["device_id"],
+        serde_json::json!(DEVICE_ID_B64)
+    );
+    roundtrips(&identified);
+}
+
+#[test]
+fn a_revoked_or_unregistered_device_is_refused_by_name() {
+    assert_eq!(
+        json(&IssuanceRefusal::DeviceRevoked),
+        serde_json::json!({ "error": "device_revoked" })
+    );
+    assert_eq!(
+        json(&IssuanceRefusal::DeviceUnregistered),
+        serde_json::json!({ "error": "device_unregistered" })
+    );
+    roundtrips(&IssuanceRefusal::DeviceRevoked);
+    roundtrips(&IssuanceRefusal::DeviceUnregistered);
+}
