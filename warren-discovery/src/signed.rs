@@ -911,7 +911,8 @@ pub(crate) fn json_node_to_warren(n: JsonNode) -> Result<WarrenRelay, JsonError>
     )
     .with_cover_domain(n.cover_domain)
     .with_port_forward(n.port_forward)
-    .with_tcp_fallback(n.tcp_fallback))
+    .with_tcp_fallback(n.tcp_fallback)
+    .with_fleet_name(n.name))
 }
 
 #[cfg(test)]
@@ -1924,6 +1925,54 @@ mod tests {
             );
         }
         assert!(unknown_signed_fields_for(SIGNED_VERSION_V2, &payload).is_empty());
+    }
+
+    /// A client shows an exit by the fleet name the operator knows it by, so
+    /// the name has to survive verification into the runtime node.
+    #[test]
+    fn a_verified_v11_node_keeps_its_fleet_name() {
+        let key = fixed_server_key();
+        let signed = sign_relay_list_v2(vec![named_node()], &key, 12, 1_700_000_000, 1_700_086_400);
+        let raw = serde_json::to_string(&signed).expect("to_string");
+        let verified = verify_signed_relay_list(&raw, None).expect("verifies");
+        assert_eq!(
+            verified.relays.relays()[0].fleet_name(),
+            Some("fr-par-bved1")
+        );
+    }
+
+    /// A node that has not reported every component carries no name, and so
+    /// does every node of a v10 list: the client then falls back to its own
+    /// label rather than inventing one.
+    #[test]
+    fn a_node_without_a_name_has_none() {
+        let key = fixed_server_key();
+        let signed =
+            sign_relay_list_v2(vec![sample_node()], &key, 12, 1_700_000_000, 1_700_086_400);
+        let raw = serde_json::to_string(&signed).expect("to_string");
+        let verified = verify_signed_relay_list(&raw, None).expect("verifies");
+        assert_eq!(verified.relays.relays()[0].fleet_name(), None);
+    }
+
+    /// The name is operator text that ends up on a screen, so anything outside
+    /// the scheme's alphabet is dropped instead of displayed.
+    #[test]
+    fn a_name_outside_the_scheme_alphabet_is_dropped() {
+        let too_long = "a".repeat(33);
+        for bad in [
+            "",
+            "FR-PAR-BVED1",
+            "fr par",
+            "fr-par-bved1\u{202e}",
+            too_long.as_str(),
+        ] {
+            let node = JsonNode {
+                name: Some(bad.to_owned()),
+                ..sample_node()
+            };
+            let relay = json_node_to_warren(node).expect("node");
+            assert_eq!(relay.fleet_name(), None, "{bad:?} must not be displayed");
+        }
     }
 
     /// THE regression guard for this whole rotation. A v10 list emitted with

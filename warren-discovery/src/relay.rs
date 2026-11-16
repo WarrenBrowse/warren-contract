@@ -388,9 +388,29 @@ pub struct WarrenRelay {
     /// binary pre-dates it: unknown). Comes straight from the v9 wire; the
     /// client only offers or prefers port forwarding when it is `Some(true)`.
     port_forward: Option<bool>,
+    /// The fleet name the operator knows the node by (`fr-par-bved1`), as the
+    /// v11 roster carries it. `None` on a v10 roster, for a node that has not
+    /// reported every naming component, and for a name outside the scheme's
+    /// alphabet.
+    fleet_name: Option<String>,
     /// Derived dial target (entry listeners → sockets), cached at
     /// construction so the hot dial path stays cheap.
     endpoint_addr: WarrenExitAddr,
+}
+
+/// The longest fleet name accepted for display. The scheme composes about a
+/// dozen characters; the bound only keeps a malformed name off a screen.
+const MAX_FLEET_NAME_LEN: usize = 32;
+
+/// Whether `name` is in the scheme's alphabet: lower-case ASCII letters,
+/// digits and hyphens. The name is shown verbatim, so anything else (upper
+/// case, spaces, bidirectional controls) is refused rather than displayed.
+fn is_fleet_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_FLEET_NAME_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 impl WarrenRelay {
@@ -428,6 +448,7 @@ impl WarrenRelay {
             egress_v4_cap,
             egress_v6_cap,
             port_forward: None,
+            fleet_name: None,
             endpoint_addr,
         }
     }
@@ -463,6 +484,7 @@ impl WarrenRelay {
             egress_v4_cap: egress_v4,
             egress_v6_cap: egress_v6,
             port_forward: None,
+            fleet_name: None,
             endpoint_addr,
         }
     }
@@ -477,6 +499,14 @@ impl WarrenRelay {
         if let Some(domain) = cover_domain {
             self.endpoint_addr = self.endpoint_addr.with_cover_domain(domain);
         }
+        self
+    }
+
+    /// Stamps the fleet name the v11 roster carries. A name outside the scheme's
+    /// alphabet is dropped: it would be shown verbatim.
+    #[must_use]
+    pub fn with_fleet_name(mut self, name: Option<String>) -> Self {
+        self.fleet_name = name.filter(|name| is_fleet_name(name));
         self
     }
 
@@ -602,6 +632,13 @@ impl WarrenRelay {
     #[must_use]
     pub fn port_forward(&self) -> Option<bool> {
         self.port_forward
+    }
+
+    /// The fleet name the operator knows the node by (`fr-par-bved1`), when the
+    /// roster carried a valid one.
+    #[must_use]
+    pub fn fleet_name(&self) -> Option<&str> {
+        self.fleet_name.as_deref()
     }
 
     /// Distinct ALPN tokens advertised across this node's `entry`
