@@ -26,6 +26,7 @@
 //! the relay selector.
 
 pub mod auth;
+pub mod device_revocation;
 pub mod dto;
 pub mod env;
 pub mod fallback;

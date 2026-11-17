@@ -4542,6 +4542,61 @@ pub struct DeviceRename {
     pub name: String,
 }
 
+/// A device revocation signed by the wallet holder (audit finding X-01): the
+/// body of the wallet-signed `DELETE /v1/devices/{device_id}`, and the
+/// `revocation` member of the 403 `device_revoked` body the API answers that
+/// device with. The message it signs is built by
+/// [`crate::device_revocation::signed_message`]; frozen by
+/// `vectors/device_revocation_v1.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRevocation {
+    /// When the holder revoked the device, unix seconds.
+    pub revoked_at_unix_secs: u64,
+    /// Ed25519 signature by the wallet key, 128 lowercase hex characters.
+    pub signature_hex: String,
+}
+
+/// The 403 body of a registration, a token issuance or a device route
+/// refused for the device: `{"error":"device_revoked"}` or
+/// `{"error":"device_unregistered"}`. Clients compare `error` as a string;
+/// `revocation` is present on `device_revoked` when the holder signed the
+/// revocation, and an older client ignores it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRefusal {
+    /// `device_revoked` or `device_unregistered`.
+    pub error: String,
+    /// The holder's signed statement, which the revoked device verifies before
+    /// it erases its identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<DeviceRevocation>,
+}
+
+impl DeviceRefusal {
+    /// The `error` value of a revoked device.
+    pub const REVOKED: &'static str = "device_revoked";
+    /// The `error` value of a device the account does not hold.
+    pub const UNREGISTERED: &'static str = "device_unregistered";
+
+    /// A `device_revoked` refusal, carrying the signed statement when the
+    /// revocation has one.
+    #[must_use]
+    pub fn revoked(revocation: Option<DeviceRevocation>) -> Self {
+        Self {
+            error: Self::REVOKED.to_owned(),
+            revocation,
+        }
+    }
+
+    /// A `device_unregistered` refusal.
+    #[must_use]
+    pub fn unregistered() -> Self {
+        Self {
+            error: Self::UNREGISTERED.to_owned(),
+            revocation: None,
+        }
+    }
+}
+
 /// `POST /v1/tokens/issue` response body (always HTTP 200; per-epoch outcome
 /// in the body). An epoch the policy refused carries `issued=false` and a
 /// `reject_reason`, so a partially-covered request still returns the epochs
