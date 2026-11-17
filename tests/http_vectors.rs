@@ -1855,13 +1855,13 @@ fn a_token_issue_request_names_its_device_only_when_it_has_one() {
 #[test]
 fn a_revoked_or_unregistered_device_is_refused_by_name() {
     assert_eq!(
-        json(&IssuanceRefusal::DeviceRevoked),
+        json(&IssuanceRefusal::DeviceRevoked { revocation: None }),
         serde_json::json!({ "error": "device_revoked" })
     );
     assert_eq!(
         json(&IssuanceRefusal::DeviceUnregistered),
         serde_json::json!({ "error": "device_unregistered" })
     );
-    roundtrips(&IssuanceRefusal::DeviceRevoked);
+    roundtrips(&IssuanceRefusal::DeviceRevoked { revocation: None });
     roundtrips(&IssuanceRefusal::DeviceUnregistered);
 }

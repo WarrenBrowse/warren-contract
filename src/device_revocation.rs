@@ -1,6 +1,7 @@
 //! The wallet holder's signature over a device revocation (warren-core doc
 //! 115, audit finding X-01), carried as [`DeviceRevocation`] in the body of
-//! `DELETE /v1/devices/{device_id}` and in the 403 `device_revoked` body.
+//! `DELETE /v1/devices/{device_id}` and in the 403
+//! [`IssuanceRefusal::DeviceRevoked`] body.
 //!
 //! ```text
 //! message = "warren/device-revocation/v1" (27 bytes) || wallet_pubkey:[u8; 32]
@@ -23,7 +24,7 @@
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 
-use crate::dto::{DEVICE_ID_LEN, DeviceId, DeviceRefusal, DeviceRevocation};
+use crate::dto::{DEVICE_ID_LEN, DeviceId, DeviceRevocation, IssuanceRefusal};
 
 /// Domain separator opening the signed message.
 pub const DOMAIN: &[u8] = b"warren/device-revocation/v1";
@@ -116,17 +117,14 @@ pub fn verify(
 ///
 /// [`DeviceRevocationError`]: disconnect and keep the identity.
 pub fn verify_refusal(
-    refusal: &DeviceRefusal,
+    refusal: &IssuanceRefusal,
     wallet: &VerifyingKey,
     device_id: &DeviceId,
 ) -> Result<(), DeviceRevocationError> {
-    if refusal.error != DeviceRefusal::REVOKED {
+    let IssuanceRefusal::DeviceRevoked { revocation } = refusal else {
         return Err(DeviceRevocationError::NotRevoked);
-    }
-    let statement = refusal
-        .revocation
-        .as_ref()
-        .ok_or(DeviceRevocationError::Unsigned)?;
+    };
+    let statement = revocation.as_ref().ok_or(DeviceRevocationError::Unsigned)?;
     verify(statement, wallet, device_id)
 }
 
@@ -142,10 +140,12 @@ mod tests {
     fn an_unregistered_refusal_never_allows_an_erase() {
         let wallet = key(1);
         let id = DeviceId::from_bytes([2; DEVICE_ID_LEN]);
-        let mut refusal = DeviceRefusal::unregistered();
-        refusal.revocation = Some(sign(&wallet, &id, 10));
         assert_eq!(
-            verify_refusal(&refusal, &wallet.verifying_key(), &id),
+            verify_refusal(
+                &IssuanceRefusal::DeviceUnregistered,
+                &wallet.verifying_key(),
+                &id
+            ),
             Err(DeviceRevocationError::NotRevoked)
         );
     }
