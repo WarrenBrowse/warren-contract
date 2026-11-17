@@ -88,6 +88,15 @@ fn the_message_layout_is_frozen() {
 }
 
 #[test]
+fn the_vector_is_dated_to_a_utc_day() {
+    let v = vector();
+    assert_eq!(
+        warren_contract::device_revocation::revocation_day(v.revoked_at_unix_secs),
+        v.revoked_at_unix_secs
+    );
+}
+
+#[test]
 fn the_wallet_signs_the_statement_byte_for_byte() {
     let v = vector();
     let statement = sign(&wallet(&v), &device(&v), v.revoked_at_unix_secs);

@@ -4550,7 +4550,10 @@ pub struct DeviceRename {
 /// `vectors/device_revocation_v1.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRevocation {
-    /// When the holder revoked the device, unix seconds.
+    /// The UTC day the holder revoked the device, as the unix seconds of its
+    /// 00:00 ([`crate::device_revocation::revocation_day`]): the registry keeps
+    /// no finer time than the day, and the API refuses a statement that is
+    /// not on a day boundary.
     pub revoked_at_unix_secs: u64,
     /// Ed25519 signature by the wallet key, 128 lowercase hex characters.
     pub signature_hex: String,

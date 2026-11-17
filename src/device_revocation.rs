@@ -20,6 +20,10 @@
 //! device id binds one install, so the API cannot serve one device's genuine
 //! revocation to a sibling. Nothing expires: a revocation is permanent.
 //!
+//! `revoked_at` is a day, the unix seconds of 00:00 UTC
+//! ([`revocation_day`]): the registry records the revocation to the day and
+//! no finer, so the statement it stores carries no time of day either.
+//!
 //! The layout is frozen by `vectors/device_revocation_v1.json`.
 
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
@@ -54,6 +58,16 @@ pub enum DeviceRevocationError {
     NotRevoked,
 }
 
+/// Seconds in the UTC day a revocation is dated to.
+pub const DAY_SECS: u64 = 86_400;
+
+/// The `revoked_at` of a revocation made at `now_unix_secs`: 00:00 UTC of
+/// that day.
+#[must_use]
+pub const fn revocation_day(now_unix_secs: u64) -> u64 {
+    now_unix_secs - now_unix_secs % DAY_SECS
+}
+
 /// The 83-byte message the wallet key signs.
 #[must_use]
 pub fn signed_message(
@@ -73,7 +87,8 @@ pub fn signed_message(
 }
 
 /// Signs the revocation of `device_id` with the wallet key, as the revoking
-/// device does before it sends `DELETE /v1/devices/{device_id}`.
+/// device does before it sends `DELETE /v1/devices/{device_id}`, with
+/// `revoked_at_unix_secs` from [`revocation_day`].
 #[must_use]
 pub fn sign(
     wallet: &SigningKey,
@@ -148,6 +163,13 @@ mod tests {
             ),
             Err(DeviceRevocationError::NotRevoked)
         );
+    }
+
+    #[test]
+    fn a_revocation_is_dated_to_its_utc_day() {
+        assert_eq!(revocation_day(1_794_960_000), 1_794_960_000);
+        assert_eq!(revocation_day(1_794_960_000 + 86_399), 1_794_960_000);
+        assert_eq!(revocation_day(1_794_960_000 + 86_400), 1_795_046_400);
     }
 
     #[test]
